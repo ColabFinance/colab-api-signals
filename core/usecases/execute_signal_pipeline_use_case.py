@@ -4,8 +4,6 @@ import logging
 from math import sqrt
 from typing import Dict, List, Optional, Tuple
 
-from pydantic import Field
-
 from adapters.external.notify.telegram_notifier import TelegramNotifier
 from core.common.utils import sanitize_for_bson
 from core.domain.entities.signal_entity import SignalEntity
@@ -55,7 +53,7 @@ class ExecuteSignalPipelineUseCase:
         self._base_backoff = base_backoff_sec
         self._notifier = notifier
         self._idempotency = idempotency_service or IdempotencyKeyService()
-        self._locks: dict[str, asyncio.Lock] = Field(default_factory=dict)
+        self._locks: dict[str, asyncio.Lock] = {}
 
         self._locks_lock = asyncio.Lock()  # pra criar locks de forma segura
         self._max_parallel = max_parallel

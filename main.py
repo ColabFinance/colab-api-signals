@@ -9,6 +9,7 @@ from adapters.entry.http.trigger_router import router as triggers_router
 
 from adapters.external.database.mongodb_client import get_mongo_client
 from config.settings import settings
+from workers.signal_executor_supervisor import SignalExecutorSupervisor
 
 
 def _setup_logging() -> None:
@@ -43,11 +44,35 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("MongoDB ping failed (startup).")
         raise
-
+    
+    # Optional tuning
+    poll_interval_s = float(os.getenv("SIGNAL_EXECUTOR_POLL_INTERVAL_S", "5"))
+    app.state.trigger_max_concurrency = int(os.getenv("TRIGGER_MAX_CONCURRENCY", "10"))
+    
+    # Start background executor loop
+    executor = SignalExecutorSupervisor(
+        mongo_client=mongo_client,
+        db=db,
+        lp_base_url=settings.LP_BASE_URL,
+        telegram_bot_token=getattr(settings, "TELEGRAM_BOT_TOKEN", "") or "",
+        telegram_chat_id=getattr(settings, "TELEGRAM_CHAT_ID", "") or "",
+        poll_interval_s=poll_interval_s,
+    )
+    app.state.signal_executor = executor
+    
+    await executor.start()
+    
     try:
         yield
     finally:
         logger.info("Shutting down api-signals (lifespan shutdown)...")
+
+        try:
+            if getattr(app.state, "signal_executor", None) is not None:
+                await app.state.signal_executor.stop()
+        except Exception:
+            logger.exception("Failed stopping SignalExecutorSupervisor.")
+
         mongo_client.close()
         logger.info("MongoDB client closed.")
 
