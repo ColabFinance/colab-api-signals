@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
         raise
     
     # Optional tuning
-    poll_interval_s = float(os.getenv("SIGNAL_EXECUTOR_POLL_INTERVAL_S", "5"))
+    poll_interval_s = float(os.getenv("SIGNAL_EXECUTOR_POLL_INTERVAL_S", "2"))
     app.state.trigger_max_concurrency = int(os.getenv("TRIGGER_MAX_CONCURRENCY", "10"))
     
     # Start background executor loop
