@@ -250,52 +250,6 @@ class EvaluateActiveStrategiesUseCase:
 
         return P_pool, Pa_pool, Pb_pool
 
-    async def _try_override_from_pool(
-        self,
-        *,
-        params: Dict,
-        P: float,
-        Pa: float,
-        Pb: float,
-    ) -> Tuple[float, float, float, bool]:
-        """
-        Attempts to override (P,Pa,Pb) from pool status.
-        Returns (P_out, Pa_out, Pb_out, overridden_flag).
-        """
-        dex = params.get("dex", "") or ""
-        alias = params.get("alias", "") or ""
-
-        try:
-            st = await self._lp_client.get_status(dex, alias)
-        except Exception as exc:
-            self._logger.warning(
-                "lp_client.get_status failed; keeping Binance/episode values. dex=%s alias=%s err=%s",
-                dex,
-                alias,
-                exc,
-            )
-            return P, Pa, Pb, False
-
-        if not st:
-            return P, Pa, Pb, False
-
-        try:
-            p_pool, pa_pool, pb_pool = self._parse_pool_status(st)
-            if p_pool is not None:
-                P = p_pool
-            if pa_pool is not None and pb_pool is not None:
-                Pa, Pb = pa_pool, pb_pool
-            return P, Pa, Pb, True
-        except Exception as exc:
-            self._logger.warning(
-                "invalid status payload; keeping Binance/episode values. dex=%s alias=%s err=%s status=%s",
-                dex,
-                alias,
-                exc,
-                st,
-            )
-            return P, Pa, Pb, False
-        
     async def _pick_band_for_trend_totalwidth(
         self,
         P: float,
@@ -543,23 +497,11 @@ class EvaluateActiveStrategiesUseCase:
             atr_streaks: Dict = dict(current.atr_streak)
             
             trigger: Optional[str] = None
-            trigger_from_periodic_pool_check = False
+            # trigger_from_periodic_pool_check = False
             
             # 2) primeiro: decide se vale a pena consultar o pool
             in_range_now = self._is_in_range(P, Pa_cur, Pb_cur, eps)
 
-            # se Binance acusou fora do range, tenta confirmar com status da pool
-            if not in_range_now:
-                P, Pa_cur, Pb_cur, _ = await self._try_override_from_pool(
-                    params=params,
-                    P=P,
-                    Pa=Pa_cur,
-                    Pb=Pb_cur,
-                )
-
-                # reavalia range com os valores possivelmente corrigidos pela pool
-                in_range_now = self._is_in_range(P, Pa_cur, Pb_cur, eps)
-                
            # 2b) agora sim: atualiza streaks usando P/Pa/Pb "definitivos" (pool quando necessário)
             out_above_streak, out_below_streak, out_above_streak_total, out_below_streak_total = self._update_breakout_streaks(
                 P, Pa_cur, Pb_cur, eps,
@@ -567,36 +509,6 @@ class EvaluateActiveStrategiesUseCase:
                 out_above_streak_total, out_below_streak_total,
             )
 
-            # Pperiodic pool truth check using i_since_open + breakout_confirm ---
-            # Rule: if i_since_open % breakout_confirm == 0 -> check pool and if pool is out, trigger breakout.
-            # IMPORTANT: do NOT do it when locked (forced_high_vol_down_locked).
-            do_periodic_pool_check = (
-                (not forced_high_vol_down_locked)
-                and breakout_confirm > 0
-                and (i_since_open % (breakout_confirm + 10) == 0)
-            )
-            
-            if do_periodic_pool_check:
-                P_pool, Pa_pool, Pb_pool, got_pool = await self._try_override_from_pool(
-                    params=params,
-                    P=P,
-                    Pa=Pa_cur,
-                    Pb=Pb_cur,
-                )
-                if got_pool:
-                    # If pool says OUT, behave like breakout (cross_min/cross_max)
-                    if P_pool > Pb_pool * (1.0 + eps):
-                        trigger = "cross_max"
-                        trigger_from_periodic_pool_check = True
-                        P, Pa_cur, Pb_cur = P_pool, Pa_pool, Pb_pool
-                    elif P_pool < Pa_pool * (1.0 - eps):
-                        trigger = "cross_min"
-                        trigger_from_periodic_pool_check = True
-                        P, Pa_cur, Pb_cur = P_pool, Pa_pool, Pb_pool
-
-                    # refresh in_range_now after pool truth (for tiers logic)
-                    in_range_now = self._is_in_range(P, Pa_cur, Pb_cur, eps)
-                    
             # persiste os contadores mesmo sem evento
             await self._episode_repo.update_partial(current.id, {
                 "out_above_streak": out_above_streak,
@@ -693,23 +605,6 @@ class EvaluateActiveStrategiesUseCase:
             
             # 5) sem gatilho -> segue
             if not trigger:
-                continue
-            
-            # override P + (Pa_cur, Pb_cur) with real price/range from pool status (best-effort; fallback to episode/Binance)
-            P, Pa_cur, Pb_cur, p_from_pool = await self._try_override_from_pool(
-                params=params,
-                P=P,
-                Pa=Pa_cur,
-                Pb=Pb_cur,
-            )
-
-            # Cancel trigger only if cross range and in range inside of the position yet.
-            if (
-                (not trigger_from_periodic_pool_check)
-                and trigger in ("cross_min", "cross_max") 
-                and p_from_pool 
-                and self._is_in_range(P, Pa_cur, Pb_cur, eps)
-            ):
                 continue
 
             # 6) fechar episódio atual
