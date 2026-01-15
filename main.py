@@ -3,9 +3,10 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from adapters.entry.http.admin_router import router as admin_router
 from adapters.entry.http.trigger_router import router as triggers_router
+from adapters.entry.http.strategy_params_router import router as strategy_params_router
 
 from adapters.external.database.mongodb_client import get_mongo_client
 from config.settings import settings
@@ -79,9 +80,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="api-signals", version="0.1.0", lifespan=lifespan)
 
-# Routers devem ser incluídos fora do lifespan
-app.include_router(admin_router)
-app.include_router(triggers_router)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],  # inclui OPTIONS
+    allow_headers=["*"],  # inclui Authorization, Content-Type
+)
+
+app.include_router(strategy_params_router, prefix="/api")
+app.include_router(triggers_router, prefix="/api")
 
 
 @app.get("/healthz")
