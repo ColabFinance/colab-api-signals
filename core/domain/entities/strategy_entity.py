@@ -11,6 +11,8 @@ class StrategyEntity(MongoEntity):
     indicator_set_id: str
     params: Dict[str, Any]
 
+    alias: Optional[str] = None
+    dex: Optional[str] = None
     chain: Optional[str] = None  # "base" | "bnb"
     owner: Optional[str] = None  # lowercase 0x...
     strategy_id: Optional[int] = None  # onchain strategyId (uint)

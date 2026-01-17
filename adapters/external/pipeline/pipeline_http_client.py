@@ -27,11 +27,10 @@ class PipelineHttpClient:
     
     async def get_status(
         self, 
-        dex: str, 
-        alias: str,
+        alias_or_address: str,
         idempotency_key: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        url = f"{self._base_url}/api/vaults/{dex}/{alias}/status"
+        url = f"{self._base_url}/api/vaults/{alias_or_address}/status"
         headers = self._build_headers(idempotency_key)
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -265,84 +264,70 @@ class PipelineHttpClient:
             self._logger.exception("post_stake error for %s: %s", url, exc)
         return None
     
-    async def post_pancake_batch_unstake_exit_swap_open(
+    async def post_auto_rebalance_pancake(
         self,
         alias: str,
         token_in: str,
         token_out: str,
-        amount_in: Optional[float] = None,
-        amount_in_usd: Optional[float] = None,
-        fee: Optional[int] = None,
-        sqrt_price_limit_x96: Optional[int] = None,
-        slippage_bps: int = 50,
-        max_budget_usd: Optional[float] = None,
-        pool_override: Optional[str] = None,
+        swap_amount_in: int = 0,
+        swap_amount_out_min: int = 0,
+        sqrt_price_limit_x96: int = 0,
+        gas_strategy: str = "buffered",
         lower_tick: Optional[int] = None,
         upper_tick: Optional[int] = None,
         lower_price: Optional[float] = None,
         upper_price: Optional[float] = None,
+        fee: Optional[int] = None,
         idempotency_key: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        POST /api/vaults/pancake/{alias}/batch/unstake-exit-swap-open
+        POST /api/vaults/pancake/{alias}/auto-rebalance-pancake
 
-        Atomically:
-          1) Unstake (if staked & gauge configured)
-          2) Exit current position to idle balances in the vault
-          3) Optional: swap exact-in on Pancake v3 (same rules as /swap/exact-in)
-          4) Open new position using all idle balances and the target range
-             (same rules as /open).
-
-        body (PancakeBatchRequest):
+        body:
         {
+          "new_lower": int,
+          "new_upper": int,
+          "fee": int,
           "token_in": "0x...",
           "token_out": "0x...",
-          "amount_in": float | null,
-          "amount_in_usd": float | null,
-          "fee": int | null,
-          "sqrt_price_limit_x96": int | null,
-          "slippage_bps": int,
-          "max_budget_usd": float | null,
-          "pool_override": "0x..." | null,
-          "lower_tick": int | null,
-          "upper_tick": int | null,
-          "lower_price": float | null,
-          "upper_price": float | null
+          "swap_amount_in": int,
+          "swap_amount_out_min": int,
+          "sqrt_price_limit_x96": int,
+          "gas_strategy": "buffered"
         }
         """
-        url = f"{self._base_url}/api/vaults/pancake/{alias}/batch/unstake-exit-swap-open"
+        url = f"{self._base_url}/api/vaults/pancake/{alias}/auto-rebalance-pancake"
 
         payload = {
-            "token_in": token_in,
-            "token_out": token_out,
-            "amount_in": amount_in,
-            "amount_in_usd": amount_in_usd,
-            "fee": fee,
-            "sqrt_price_limit_x96": sqrt_price_limit_x96,
-            "slippage_bps": slippage_bps,
-            "max_budget_usd": max_budget_usd,
-            "pool_override": pool_override,
             "lower_tick": lower_tick,
             "upper_tick": upper_tick,
             "lower_price": lower_price,
             "upper_price": upper_price,
+            "fee": int(fee) if fee else None,
+            "token_in": token_in,
+            "token_out": token_out,
+            "swap_amount_in": int(swap_amount_in),
+            "swap_amount_out_min": int(swap_amount_out_min),
+            "sqrt_price_limit_x96": int(sqrt_price_limit_x96 or 0),
+            "gas_strategy": gas_strategy,
         }
+
         headers = self._build_headers(idempotency_key)
-        
+
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 r = await client.post(url, json=payload, headers=headers)
                 if r.status_code == 200:
                     return r.json()
                 self._logger.warning(
-                    "pancake batch non-200 %s: %s %s",
+                    "auto-rebalance-pancake non-200 %s: %s %s",
                     url,
                     r.status_code,
                     r.text,
                 )
         except Exception as exc:
             self._logger.exception(
-                "post_pancake_batch_unstake_exit_swap_open error for %s: %s",
+                "post_auto_rebalance_pancake error for %s: %s",
                 url,
                 exc,
             )
