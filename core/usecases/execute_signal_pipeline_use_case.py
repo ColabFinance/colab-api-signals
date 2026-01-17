@@ -286,7 +286,7 @@ class ExecuteSignalPipelineUseCase:
                     
                     elif action == "BATCH_REQUEST":
                         # after withdraw, capital is idle in vault.
-                        st = await self._lp.get_status(dex, alias)
+                        st = await self._lp.get_status(alias)
                         if not st:
                             raise RuntimeError("status_unavailable_before_swap")
                         
@@ -539,16 +539,18 @@ class ExecuteSignalPipelineUseCase:
                             success = True
                             break
 
-                        batch_res = await self._lp.post_pancake_batch_unstake_exit_swap_open(
+                        batch_res = await self._lp.post_auto_rebalance_pancake(
                             alias=alias,
-                            token_in=token_in_addr,
-                            token_out=token_out_addr,
-                            amount_in=amount_in_tokens,   # unidades do token_in
-                            amount_in_usd=None,           # evitar restrição ETH/USDC
                             lower_price=lower_price,
                             upper_price=upper_price,
+                            token_in=token_in_addr,
+                            token_out=token_out_addr,
+                            swap_amount_in=int(amount_in_tokens),
+                            swap_amount_out_min=int(0),
+                            gas_strategy="buffered",
                             idempotency_key=idem_key,
                         )
+
                         await self._append_log(
                             episode_id,
                             {
@@ -570,7 +572,7 @@ class ExecuteSignalPipelineUseCase:
                         
                     elif action == "UNSTAKE":
                         # só desestaca se status indica que há gauge e está staked
-                        st = await self._lp.get_status(dex, alias)
+                        st = await self._lp.get_status(alias)
                         if not st:
                             raise RuntimeError("status_unavailable_before_unstake")
 
@@ -592,7 +594,7 @@ class ExecuteSignalPipelineUseCase:
                         success = True
                     
                     elif action == "COLLECT":
-                        st = await self._lp.get_status(dex, alias)
+                        st = await self._lp.get_status(alias)
                         if not st:
                             raise RuntimeError("status_unavailable_before_swap")
                         
@@ -614,7 +616,7 @@ class ExecuteSignalPipelineUseCase:
                         success = True
                             
                     elif action == "WITHDRAW":
-                        st = await self._lp.get_status(dex, alias, idempotency_key=idem_key)
+                        st = await self._lp.get_status(alias, idempotency_key=idem_key)
                         if not st:
                             raise RuntimeError("status_unavailable_before_swap")
                         
@@ -638,7 +640,7 @@ class ExecuteSignalPipelineUseCase:
 
                     elif action == "SWAP_EXACT_IN_REWARD":
                         # after withdraw, capital is idle in vault.
-                        st = await self._lp.get_status(dex, alias, idempotency_key=idem_key)
+                        st = await self._lp.get_status(alias, idempotency_key=idem_key)
                         if not st:
                             raise RuntimeError("status_unavailable_before_swap")
                         
@@ -726,7 +728,7 @@ class ExecuteSignalPipelineUseCase:
                             
                     elif action == "SWAP_EXACT_IN":
                         # after withdraw, capital is idle in vault.
-                        st = await self._lp.get_status(dex, alias, idempotency_key=idem_key)
+                        st = await self._lp.get_status(alias, idempotency_key=idem_key)
                         if not st:
                             raise RuntimeError("status_unavailable_before_swap")
                         
@@ -945,7 +947,7 @@ class ExecuteSignalPipelineUseCase:
                     
                     elif action == "STAKE":
                         # estaca somente se existir gauge e a posição estiver no pool (não-gauge)
-                        st = await self._lp.get_status(dex, alias, idempotency_key=idem_key)
+                        st = await self._lp.get_status(alias, idempotency_key=idem_key)
                         if not st:
                             raise RuntimeError("status_unavailable_before_stake")
 
