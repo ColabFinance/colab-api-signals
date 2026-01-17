@@ -52,7 +52,7 @@ class StrategyReconcilerService:
         # pull live vault status so we know if position exists / is aligned
         lp_status = None
         if dex and alias:
-            lp_status = await self._lp.get_status(dex=dex, alias=alias)
+            lp_status = await self._lp.get_status(alias)
 
         # No LP or no position yet -> first time open
         if not lp_status or not lp_status.get("pool"):

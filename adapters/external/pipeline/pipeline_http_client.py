@@ -30,7 +30,7 @@ class PipelineHttpClient:
         alias_or_address: str,
         idempotency_key: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        url = f"{self._base_url}/vaults/{alias_or_address}/status"
+        url = f"{self._base_url}/api/vaults/{alias_or_address}/status"
         headers = self._build_headers(idempotency_key)
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:

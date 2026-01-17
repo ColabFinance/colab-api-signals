@@ -887,7 +887,7 @@ class ExecuteSignalPipelineUseCase:
                                                  
                     elif action == "OPEN":
                         # Antes de abrir nova faixa, snapshot de idle caps atuais
-                        st2 = await self._lp.get_status(dex, alias)
+                        st2 = await self._lp.get_status(alias)
                         if not st2:
                             raise RuntimeError("status_unavailable_before_open")
 
@@ -1111,7 +1111,7 @@ class ExecuteSignalPipelineUseCase:
                 p_t0_t1 = float(prices.get("p_t0_t1") or (0.0 if p_t1_t0 == 0.0 else 1.0 / p_t1_t0))
 
                 # busca status completo para descobrir quais tokens são USD-like
-                st_for_prices = await self._lp.get_status(dex, alias)
+                st_for_prices = await self._lp.get_status(alias)
                 holdings_full = (st_for_prices or {}).get("holdings", {}) or {}
                 syms = (holdings_full.get("symbols") or {})
                 sym0 = (syms.get("token0") or "").upper()

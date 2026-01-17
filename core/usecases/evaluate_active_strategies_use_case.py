@@ -361,6 +361,10 @@ class EvaluateActiveStrategiesUseCase:
             return
 
         for strat in strategies:
+
+            if strat.alias is None:
+                return
+            
             params = strat.params
             eps = float(params.get("eps", 1e-6))
             cooloff = int(params.get("cooloff_bars", 1))
@@ -441,8 +445,8 @@ class EvaluateActiveStrategiesUseCase:
                     out_below_streak=0,
                     out_above_streak_total=0,
                     out_below_streak_total=0,
-                    dex=params.get("dex"),
-                    alias=params.get("alias"),
+                    dex=strat.dex,
+                    alias=strat.alias,
                     token0_address=params.get("token0_address"),
                     token1_address=params.get("token1_address"),
                     gauge_flow_enabled=gauge_flow_enabled,
@@ -704,8 +708,8 @@ class EvaluateActiveStrategiesUseCase:
                     out_below_streak=0,
                     out_above_streak_total=0,
                     out_below_streak_total=0,
-                    dex=params.get("dex"),
-                    alias=params.get("alias"),
+                    dex=strat.dex,
+                    alias=strat.alias,
                     token0_address=params.get("token0_address"),
                     token1_address=params.get("token1_address"),
                     gauge_flow_enabled=gauge_flow_enabled,
