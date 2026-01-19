@@ -5,6 +5,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from adapters.entry.http.deps import get_db
 from adapters.entry.http.dtos.strategy_params_dtos import StrategyParamsUpsertRequest, StrategyParamsOut
+from adapters.entry.http.auth.user_auth import require_user, UserPrincipal
 
 from adapters.external.database.strategy_repository_mongodb import StrategyRepositoryMongoDB
 from core.usecases.strategy_params_use_case import StrategyParamsUseCase
@@ -24,8 +25,13 @@ async def get_strategy_params(
     owner: str = Query(...),
     strategy_id: int = Query(..., ge=1),
     db: AsyncIOMotorDatabase = Depends(get_db),
+    user: UserPrincipal = Depends(require_user),
 ):
     try:
+        # Authorization: user can only read their own owner doc
+        if (owner or "").strip().lower() != user.wallet_address:
+            raise HTTPException(status_code=403, detail="Not authorized for this owner address.")
+
         uc = get_use_case(db)
         await uc.ensure_indexes()
 
@@ -44,8 +50,13 @@ async def get_strategy_params(
 async def upsert_strategy_params(
     body: StrategyParamsUpsertRequest,
     db: AsyncIOMotorDatabase = Depends(get_db),
+    user: UserPrincipal = Depends(require_user),
 ):
     try:
+        # Authorization: user can only upsert their own owner doc
+        if (body.owner or "").strip().lower() != user.wallet_address:
+            raise HTTPException(status_code=403, detail="Not authorized for this owner address.")
+
         uc = get_use_case(db)
         await uc.ensure_indexes()
 
