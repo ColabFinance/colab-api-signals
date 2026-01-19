@@ -34,5 +34,10 @@ class Settings:
     # Log / app
     APP_NAME: str = os.getenv("APP_NAME", "api-signals")
 
-
+    # Admin / Privy Auth
+    PRIVY_APP_ID: str = os.getenv("PRIVY_APP_ID", "")
+    PRIVY_JWKS_URL: str = os.getenv("PRIVY_JWKS_URL", "https://auth.privy.io/api/v1/apps/jwks")
+    ADMIN_WALLETS: str = os.getenv("ADMIN_WALLETS", "")
+    PRIVY_APP_SECRET: str = os.getenv("PRIVY_APP_SECRET", "")
+    
 settings = Settings()
