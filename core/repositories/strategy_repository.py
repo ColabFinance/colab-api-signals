@@ -40,3 +40,15 @@ class StrategyRepository(ABC):
     @abstractmethod
     async def exists_by_name_symbol(self, name: str, symbol: str) -> bool:
         raise NotImplementedError
+    
+    @abstractmethod
+    async def list_by_owner_chain(
+        self,
+        chain: str,
+        owner: str,
+        status: Optional[str] = None,
+    ) -> List[StrategyEntity]:
+        """
+        List strategy docs by (chain, owner), optionally filtering by status.
+        """
+        raise NotImplementedError

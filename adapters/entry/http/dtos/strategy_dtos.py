@@ -182,3 +182,27 @@ class StrategyExistsQuery(BaseModel):
         if not v:
             raise ValueError("name is required")
         return v
+    
+
+class StrategyListQuery(BaseModel):
+    chain: ChainKey
+    owner: str
+    status: Optional[str] = None  # "ACTIVE" | "INACTIVE" | None
+
+    @field_validator("owner")
+    @classmethod
+    def validate_owner(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not Web3.is_address(v):
+            raise ValueError("Invalid owner address")
+        return v.lower()
+
+    @field_validator("status")
+    @classmethod
+    def norm_status(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        vv = (v or "").strip().upper()
+        if not vv:
+            return None
+        return "ACTIVE" if vv == "ACTIVE" else "INACTIVE"

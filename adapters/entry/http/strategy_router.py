@@ -1,14 +1,15 @@
 from __future__ import annotations
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from adapters.entry.http.deps import get_db
-from adapters.entry.http.dtos.strategy_dtos import StrategyExistsQuery, StrategyExistsResponse, StrategyParamsUpsertRequest, StrategyParamsOut, StrategyRegisterRequest
+from adapters.entry.http.dtos.strategy_dtos import StrategyExistsQuery, StrategyExistsResponse, StrategyListQuery, StrategyParamsUpsertRequest, StrategyParamsOut, StrategyRegisterRequest
 from adapters.entry.http.auth.user_auth import require_user, UserPrincipal
 
 from adapters.external.database.strategy_repository_mongodb import StrategyRepositoryMongoDB
-from core.usecases.strategy_params_use_case import StrategyParamsUseCase
+from core.usecases.strategy_use_case import StrategyParamsUseCase
 
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
@@ -125,3 +126,32 @@ async def strategy_exists(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to check strategy existence: {exc}") from exc
+
+
+@router.get("/list", response_model=dict)
+async def list_strategies(
+    chain: str = Query(...),
+    owner: str = Query(...),
+    status: Optional[str] = Query(None),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    user: UserPrincipal = Depends(require_user),
+):
+    try:
+        if (owner or "").strip().lower() != user.wallet_address:
+            raise HTTPException(status_code=403, detail="Not authorized for this owner address.")
+
+        q = StrategyListQuery(chain=chain, owner=owner, status=status)
+
+        uc = get_use_case(db)
+        await uc.ensure_indexes()
+
+        ents = await uc.list_by_owner_chain(chain=q.chain, owner=q.owner, status=q.status)
+        data = [StrategyParamsOut.model_validate(e.model_dump()) for e in (ents or [])]
+
+        return {"ok": True, "message": "ok", "data": data}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to list strategies: {exc}") from exc
