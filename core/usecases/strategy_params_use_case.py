@@ -76,3 +76,61 @@ class StrategyParamsUseCase:
         )
 
         return await self.repo.upsert_by_onchain_identity(ent)
+
+    async def upsert_registry_metadata(self, *, data: Dict[str, Any]) -> StrategyEntity:
+        """
+        Upserts registry metadata AFTER onchain strategy registration.
+
+        Identity: (chain, owner, strategy_id)
+        """
+        chain = _lower(data.get("chain"))
+        owner = _lower(data.get("owner"))
+        strategy_id = int(data.get("strategy_id") or 0)
+
+        if not chain:
+            raise ValueError("chain is required")
+        if not owner:
+            raise ValueError("owner is required")
+        if strategy_id <= 0:
+            raise ValueError("strategy_id must be >= 1")
+
+        name = _norm(data.get("name"))
+        symbol = _norm(data.get("symbol")).upper()
+        indicator_set_id = _norm(data.get("indicator_set_id"))
+        status = (_norm(data.get("status")) or "INACTIVE").upper()
+        status = "ACTIVE" if status == "ACTIVE" else "INACTIVE"
+
+        if not name:
+            raise ValueError("name is required")
+        if not symbol:
+            raise ValueError("symbol is required")
+        if not indicator_set_id:
+            raise ValueError("indicator_set_id is required")
+
+        ent = StrategyEntity(
+            name=name,
+            symbol=symbol,
+            indicator_set_id=indicator_set_id,
+            status=status,
+            params={},  # init
+
+            chain=chain,
+            owner=owner,
+            strategy_id=strategy_id,
+            adapter=_norm(data.get("adapter")) or None,
+            dex_router=_norm(data.get("dex_router")) or None,
+            token0=_norm(data.get("token0")) or None,
+            token1=_norm(data.get("token1")) or None,
+            tx_hash=_norm(data.get("tx_hash")) or None,
+        )
+
+        return await self.repo.upsert_by_onchain_identity(ent)
+
+    async def exists_by_name_symbol(self, *, name: str, symbol: str) -> bool:
+        name = _norm(name)
+        symbol = _norm(symbol).upper()
+        if not name:
+            raise ValueError("name is required")
+        if not symbol:
+            raise ValueError("symbol is required")
+        return await self.repo.exists_by_name_symbol(name, symbol)

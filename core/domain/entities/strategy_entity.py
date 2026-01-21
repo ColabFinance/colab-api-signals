@@ -1,15 +1,14 @@
 from typing import Any, Dict, Optional
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 from .base_entity import MongoEntity
 
 
 class StrategyEntity(MongoEntity):
-    # ===== existing fields (keep) =====
     name: str
     symbol: str
     status: str
     indicator_set_id: str
-    params: Dict[str, Any]
+    params: Dict[str, Any] = Field(default_factory=dict)
 
     alias: Optional[str] = None
     dex: Optional[str] = None

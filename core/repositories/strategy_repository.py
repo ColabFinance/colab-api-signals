@@ -36,3 +36,7 @@ class StrategyRepository(ABC):
     @abstractmethod
     async def get_by_onchain_identity(self, chain: str, owner: str, strategy_id: int) -> Optional[StrategyEntity]:
         raise NotImplementedError
+
+    @abstractmethod
+    async def exists_by_name_symbol(self, name: str, symbol: str) -> bool:
+        raise NotImplementedError
