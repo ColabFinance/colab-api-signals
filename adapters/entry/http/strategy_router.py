@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from adapters.entry.http.deps import get_db
-from adapters.entry.http.dtos.strategy_params_dtos import StrategyParamsUpsertRequest, StrategyParamsOut
+from adapters.entry.http.dtos.strategy_dtos import StrategyExistsQuery, StrategyExistsResponse, StrategyParamsUpsertRequest, StrategyParamsOut, StrategyRegisterRequest
 from adapters.entry.http.auth.user_auth import require_user, UserPrincipal
 
 from adapters.external.database.strategy_repository_mongodb import StrategyRepositoryMongoDB
@@ -69,3 +69,59 @@ async def upsert_strategy_params(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to upsert strategy params: {exc}") from exc
+
+
+@router.post("/register", response_model=dict)
+async def register_strategy(
+    body: StrategyRegisterRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    user: UserPrincipal = Depends(require_user),
+):
+    try:
+        if (body.owner or "").strip().lower() != user.wallet_address:
+            raise HTTPException(status_code=403, detail="Not authorized for this owner address.")
+
+        uc = get_use_case(db)
+        await uc.ensure_indexes()
+
+        ent = await uc.upsert_registry_metadata(data=body.model_dump())
+        data = StrategyParamsOut.model_validate(ent.model_dump())
+        return {"ok": True, "message": "ok", "data": data}
+    except HTTPException:
+        raise
+    except ValueError as e:
+        if str(e) == "DUPLICATE_NAME_SYMBOL":
+            raise HTTPException(status_code=409, detail="Strategy already exists with same (name, symbol).")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to register strategy: {exc}") from exc
+    
+@router.get("/exists", response_model=dict)
+async def strategy_exists(
+    chain: str = Query(...),
+    owner: str = Query(...),
+    name: str = Query(...),
+    symbol: str = Query(...),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    user: UserPrincipal = Depends(require_user),
+):
+    try:
+        # Authorization: user can only query their own owner
+        if (owner or "").strip().lower() != user.wallet_address:
+            raise HTTPException(status_code=403, detail="Not authorized for this owner address.")
+
+        # Validate/normalize with DTO (keeps router consistent with others)
+        q = StrategyExistsQuery(chain=chain, owner=owner, name=name, symbol=symbol)
+
+        uc = get_use_case(db)
+        await uc.ensure_indexes()
+
+        exists = await uc.exists_by_name_symbol(name=q.name, symbol=q.symbol)
+        data = StrategyExistsResponse(exists=exists)
+        return {"ok": True, "message": "ok", "data": data}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to check strategy existence: {exc}") from exc

@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from adapters.entry.http.trigger_router import router as triggers_router
-from adapters.entry.http.strategy_params_router import router as strategy_params_router
+from adapters.entry.http.strategy_router import router as strategy_params_router
 
 from adapters.external.database.mongodb_client import get_mongo_client
 from config.settings import settings
