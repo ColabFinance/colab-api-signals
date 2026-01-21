@@ -110,3 +110,12 @@ class StrategyRepositoryMongoDB(StrategyRepository):
     async def exists_by_name_symbol(self, name: str, symbol: str) -> bool:
         doc = await self._col.find_one({"name": name, "symbol": symbol}, {"_id": 1})
         return bool(doc)
+    
+    async def list_by_owner_chain(self, chain: str, owner: str, status: Optional[str] = None) -> List[StrategyEntity]:
+        q: dict = {"chain": chain, "owner": owner}
+        if status:
+            q["status"] = status
+
+        cursor = self._col.find(q).sort([("strategy_id", 1), ("created_at", 1)])
+        docs = await cursor.to_list(length=None)
+        return [StrategyEntity.from_mongo(d) for d in docs if d]

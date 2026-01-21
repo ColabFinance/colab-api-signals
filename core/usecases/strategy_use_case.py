@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from core.domain.entities.strategy_entity import StrategyEntity
 from core.repositories.strategy_repository import StrategyRepository
@@ -134,3 +134,22 @@ class StrategyParamsUseCase:
         if not symbol:
             raise ValueError("symbol is required")
         return await self.repo.exists_by_name_symbol(name, symbol)
+    
+    async def list_by_owner_chain(self, *, chain: str, owner: str, status: Optional[str] = None) -> List[StrategyEntity]:
+        chain = _lower(chain)
+        owner = _lower(owner)
+
+        st = _norm(status)
+        if st:
+            st = st.upper()
+            st = "ACTIVE" if st == "ACTIVE" else "INACTIVE"
+        else:
+            st = None
+
+        if not chain:
+            raise ValueError("chain is required")
+        if not owner:
+            raise ValueError("owner is required")
+
+        return await self.repo.list_by_owner_chain(chain=chain, owner=owner, status=st)
+
