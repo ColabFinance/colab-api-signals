@@ -545,8 +545,8 @@ class ExecuteSignalPipelineUseCase:
                             upper_price=upper_price,
                             token_in=token_in_addr,
                             token_out=token_out_addr,
-                            swap_amount_in=int(amount_in_tokens),
-                            swap_amount_out_min=int(0),
+                            swap_amount_in=amount_in_tokens,
+                            swap_amount_out_min=0,
                             gas_strategy="buffered",
                             idempotency_key=idem_key,
                         )
