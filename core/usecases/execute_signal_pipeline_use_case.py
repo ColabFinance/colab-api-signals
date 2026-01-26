@@ -127,13 +127,13 @@ class ExecuteSignalPipelineUseCase:
             denom = self.EPS_POS
         return total_P / denom
 
-    async def execute_once(self) -> None:
+    async def execute_once(self) -> bool:
         """
         Fetch up to N pending signals and attempt to execute them.
         """
         pending: List[SignalEntity] = await self._signal_repo.list_pending(limit=50)
         if not pending:
-            return
+            return False
         
         tasks = []
         for sig in pending:
@@ -141,6 +141,8 @@ class ExecuteSignalPipelineUseCase:
         
         # executa tudo em paralelo, respeitando semaphore global
         await asyncio.gather(*tasks, return_exceptions=False)
+        
+        return True
     
     async def _run_single_with_locks(self, sig: SignalEntity) -> None:
         """

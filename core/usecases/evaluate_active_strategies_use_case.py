@@ -1,6 +1,6 @@
 from datetime import datetime, time, timezone
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from adapters.external.pipeline.pipeline_http_client import PipelineHttpClient
 from core.domain.entities.signal_entity import SignalEntity, SignalStep
@@ -67,6 +67,7 @@ class EvaluateActiveStrategiesUseCase:
         reconciling_service: StrategyReconcilerService,
         lp_client: PipelineHttpClient,
         logger: Optional[logging.Logger] = None,
+        on_signal_created: Optional[Callable[[], None]] = None,
     ):
         self._strategy_repo = strategy_repo
         self._episode_repo = episode_repo
@@ -74,6 +75,7 @@ class EvaluateActiveStrategiesUseCase:
         self._reconciler = reconciling_service
         self._lp_client = lp_client
         self._logger = logger or logging.getLogger(self.__class__.__name__)
+        self._on_signal_created = on_signal_created
 
     @staticmethod
     def _trend_at(ema_fast_val: float, ema_slow_val: float) -> str:
@@ -470,6 +472,8 @@ class EvaluateActiveStrategiesUseCase:
                         last_episode=None,
                     )
                     await self._signal_repo.upsert_signal(signal)
+                    if self._on_signal_created:
+                        self._on_signal_created()
                 continue
 
             # defaults de campos antigos
@@ -805,3 +809,5 @@ class EvaluateActiveStrategiesUseCase:
                     last_episode=current,
                 )
                 await self._signal_repo.upsert_signal(signal)
+                if self._on_signal_created:
+                    self._on_signal_created()

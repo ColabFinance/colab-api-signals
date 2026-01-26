@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from fastapi import Request
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -34,13 +34,15 @@ class CandleClosedTriggerUseCase:
         pipeline_base_url: str,
         max_concurrency: int = 10,
         logger: logging.Logger | None = None,
+        signal_waker: Optional[Callable[[], None]] = None,
     ):
         self._db = db
         self._market_data_base_url = str(market_data_base_url or "").rstrip("/")
         self._pipeline_base_url = str(pipeline_base_url or "").rstrip("/")
         self._sem = asyncio.Semaphore(int(max_concurrency))
         self._logger = logger or logging.getLogger(self.__class__.__name__)
-
+        self._signal_waker = signal_waker
+        
     @staticmethod
     def _require_snapshot_fields(indicator_snapshot: Dict[str, Any]) -> None:
         required = ["symbol", "close", "ema_fast", "ema_slow", "atr_pct", "ts"]
@@ -144,6 +146,7 @@ class CandleClosedTriggerUseCase:
             reconciling_service=reconciler,
             lp_client=lp_client,
             logger=self._logger,
+            on_signal_created=self._signal_waker,
         )
 
         await eval_uc.execute_for_indicator_snapshot(
