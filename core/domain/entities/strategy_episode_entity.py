@@ -20,6 +20,9 @@ class StrategyEpisodeEntity(MongoEntity):
     Pa: float
     Pb: float
 
+    band_total_width_pct: Optional[float] = None
+    band_params: Dict[str, Any] = Field(default_factory=dict)
+    
     last_event_bar: int = 0
 
     atr_streak: Dict[str, int] = Field(default_factory=dict)

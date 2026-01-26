@@ -16,28 +16,33 @@ class PipelineHttpClient:
 
     def __init__(self, base_url: str, timeout_sec: float = 180.0):
         self._base_url = base_url.rstrip("/")
-        self._timeout = timeout_sec
         self._logger = logging.getLogger(self.__class__.__name__)
 
+        timeout = timeout_sec
+        limits = httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=30.0)
+
+        self._client = httpx.AsyncClient(
+            timeout=timeout,
+            limits=limits,
+            http2=True,
+        )
+    
+    async def aclose(self) -> None:
+        await self._client.aclose()
+        
     def _build_headers(self, idempotency_key: Optional[str] = None) -> dict:
         headers: dict = {}
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
         return headers
     
-    async def get_status(
-        self, 
-        alias_or_address: str,
-        idempotency_key: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+    async def get_status(self, alias_or_address: str, idempotency_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
         url = f"{self._base_url}/api/vaults/{alias_or_address}/status"
-        headers = self._build_headers(idempotency_key)
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                r = await client.get(url, headers=headers)
-                if r.status_code == 200:
-                    return r.json()
-                self._logger.warning("status non-200 %s: %s %s", url, r.status_code, r.text)
+            r = await self._client.get(url, headers=self._build_headers(idempotency_key))
+            if r.status_code == 200:
+                return r.json()
+            self._logger.warning("status non-200 %s: %s %s", url, r.status_code, r.text)
         except Exception as exc:
             self._logger.exception("get_status error for %s: %s", url, exc)
         return None
@@ -53,14 +58,11 @@ class PipelineHttpClient:
         body: { "alias": <alias> }
         """
         url = f"{self._base_url}/api/vaults/{dex}/{alias}/collect"
-        payload = {"alias": alias}
-        headers = self._build_headers(idempotency_key)
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                r = await client.post(url, json=payload, headers=headers)
-                if r.status_code == 200:
-                    return r.json()
-                self._logger.warning("collect non-200 %s: %s %s", url, r.status_code, r.text)
+            r = await self._client.post(url, json={"alias": alias}, headers=self._build_headers(idempotency_key))
+            if r.status_code == 200:
+                return r.json()
+            self._logger.warning("collect non-200 %s: %s %s", url, r.status_code, r.text)
         except Exception as exc:
             self._logger.exception("post_collect error for %s: %s", url, exc)
         return None
@@ -77,14 +79,11 @@ class PipelineHttpClient:
         body: { "alias": <alias>, "mode": "pool" }
         """
         url = f"{self._base_url}/api/vaults/{dex}/{alias}/withdraw"
-        payload = {"alias": alias, "mode": mode}
-        headers = self._build_headers(idempotency_key)
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                r = await client.post(url, json=payload, headers=headers)
-                if r.status_code == 200:
-                    return r.json()
-                self._logger.warning("withdraw non-200 %s: %s %s", url, r.status_code, r.text)
+            r = await self._client.post(url, json={"alias": alias, "mode": mode}, headers=self._build_headers(idempotency_key))
+            if r.status_code == 200:
+                return r.json()
+            self._logger.warning("withdraw non-200 %s: %s %s", url, r.status_code, r.text)
         except Exception as exc:
             self._logger.exception("post_withdraw error for %s: %s", url, exc)
         return None
@@ -118,15 +117,13 @@ class PipelineHttpClient:
             "amount_in": amount_in,
             "amount_in_usd": amount_in_usd,
             "convert_gauge_to_usdc": convert_gauge_to_usdc,
-            "pool_override": pool_override
+            "pool_override": pool_override,
         }
-        headers = self._build_headers(idempotency_key)
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                r = await client.post(url, json=payload, headers=headers)
-                if r.status_code == 200:
-                    return r.json()
-                self._logger.warning("swap non-200 %s: %s %s", url, r.status_code, r.text)
+            r = await self._client.post(url, json=payload, headers=self._build_headers(idempotency_key))
+            if r.status_code == 200:
+                return r.json()
+            self._logger.warning("swap non-200 %s: %s %s", url, r.status_code, r.text)
         except Exception as exc:
             self._logger.exception("post_swap_exact_in error for %s: %s", url, exc)
         return None
@@ -164,13 +161,11 @@ class PipelineHttpClient:
             "lower_price": lower_price,
             "upper_price": upper_price,
         }
-        headers = self._build_headers(idempotency_key)
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                r = await client.post(url, json=payload, headers=headers)
-                if r.status_code == 200:
-                    return r.json()
-                self._logger.warning("rebalance non-200 %s: %s %s", url, r.status_code, r.text)
+            r = await self._client.post(url, json=payload, headers=self._build_headers(idempotency_key))
+            if r.status_code == 200:
+                return r.json()
+            self._logger.warning("rebalance non-200 %s: %s %s", url, r.status_code, r.text)
         except Exception as exc:
             self._logger.exception("post_rebalance error for %s: %s", url, exc)
         return None
@@ -200,27 +195,19 @@ class PipelineHttpClient:
         qual faixa abrir. O contrato usa os saldos idle atuais do vault.
         """
         url = f"{self._base_url}/api/vaults/{dex}/{alias}/open"
-        payload = {
-            "lower_tick": lower_tick,
-            "upper_tick": upper_tick,
-            "lower_price": lower_price,
-            "upper_price": upper_price,
-        }
-        headers = self._build_headers(idempotency_key)
-        
+        payload = {"lower_tick": lower_tick, "upper_tick": upper_tick, "lower_price": lower_price, "upper_price": upper_price}
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                r = await client.post(url, json=payload, headers=headers)
-                if r.status_code == 200:
-                    return r.json()
-                self._logger.warning("open non-200 %s: %s %s", url, r.status_code, r.text)
+            r = await self._client.post(url, json=payload, headers=self._build_headers(idempotency_key))
+            if r.status_code == 200:
+                return r.json()
+            self._logger.warning("open non-200 %s: %s %s", url, r.status_code, r.text)
         except Exception as exc:
             self._logger.exception("post_open error for %s: %s", url, exc)
         return None
     
     async def post_unstake(
-        self, 
-        dex: str, 
+        self,
+        dex: str,
         alias: str,
         idempotency_key: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
@@ -229,13 +216,11 @@ class PipelineHttpClient:
         body: {}
         """
         url = f"{self._base_url}/api/vaults/{dex}/{alias}/unstake"
-        headers = self._build_headers(idempotency_key)
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                r = await client.post(url, json={}, headers=headers)
-                if r.status_code == 200:
-                    return r.json()
-                self._logger.warning("unstake non-200 %s: %s %s", url, r.status_code, r.text)
+            r = await self._client.post(url, json={}, headers=self._build_headers(idempotency_key))
+            if r.status_code == 200:
+                return r.json()
+            self._logger.warning("unstake non-200 %s: %s %s", url, r.status_code, r.text)
         except Exception as exc:
             self._logger.exception("post_unstake error for %s: %s", url, exc)
         return None
@@ -253,13 +238,11 @@ class PipelineHttpClient:
         """
         url = f"{self._base_url}/api/vaults/{dex}/{alias}/stake"
         payload = {}
-        headers = self._build_headers(idempotency_key)
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                r = await client.post(url, json=payload, headers=headers)
-                if r.status_code == 200:
-                    return r.json()
-                self._logger.warning("stake non-200 %s: %s %s", url, r.status_code, r.text)
+            r = await self._client.post(url, json=payload, headers=self._build_headers(idempotency_key))
+            if r.status_code == 200:
+                return r.json()
+            self._logger.warning("stake non-200 %s: %s %s", url, r.status_code, r.text)
         except Exception as exc:
             self._logger.exception("post_stake error for %s: %s", url, exc)
         return None
@@ -312,23 +295,11 @@ class PipelineHttpClient:
             "gas_strategy": gas_strategy,
         }
 
-        headers = self._build_headers(idempotency_key)
-
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                r = await client.post(url, json=payload, headers=headers)
-                if r.status_code == 200:
-                    return r.json()
-                self._logger.warning(
-                    "auto-rebalance-pancake non-200 %s: %s %s",
-                    url,
-                    r.status_code,
-                    r.text,
-                )
+            r = await self._client.post(url, json=payload, headers=self._build_headers(idempotency_key))
+            if r.status_code == 200:
+                return r.json()
+            self._logger.warning("auto-rebalance-pancake non-200 %s: %s %s", url, r.status_code, r.text)
         except Exception as exc:
-            self._logger.exception(
-                "post_auto_rebalance_pancake error for %s: %s",
-                url,
-                exc,
-            )
+            self._logger.exception("post_auto_rebalance_pancake error for %s: %s", url, exc)
         return None

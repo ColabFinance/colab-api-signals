@@ -42,7 +42,14 @@ class SignalExecutorSupervisor:
 
         self._task: asyncio.Task | None = None
         self._uc: ExecuteSignalPipelineUseCase | None = None
-
+        self._lp_client: PipelineHttpClient | None = None
+        
+        self._wake = asyncio.Event()
+        
+    def wake(self) -> None:
+        # chamada rápida: “tem trabalho novo”
+        self._wake.set()
+        
     async def start(self) -> None:
         # repos
         strategy_repo = StrategyRepositoryMongoDB(self._db)
@@ -65,33 +72,51 @@ class SignalExecutorSupervisor:
             )
 
         # lp client
-        lp_client = PipelineHttpClient(self._lp_base_url)
+        self._lp_client = PipelineHttpClient(self._lp_base_url)
 
         # UC that drains signals
         self._uc = ExecuteSignalPipelineUseCase(
             signal_repo=signal_repo,
             episode_repo=episode_repo,
-            lp_client=lp_client,
+            lp_client=self._lp_client,
             notifier=notifier,
         )
 
         async def _loop() -> None:
             self._logger.info("Signal executor loop started. poll_interval_s=%s", self._poll_interval_s)
             while True:
+                processed_any = False
                 try:
-                    await self._uc.execute_once()
+                    processed_any = await self._uc.execute_once()
                 except Exception as exc:
                     self._logger.exception("Signal executor loop error: %s", exc)
-                await asyncio.sleep(self._poll_interval_s)
 
-        self._task = asyncio.create_task(_loop())
+                # se processou algo, tenta drenar mais imediatamente (sem esperar)
+                if processed_any:
+                    continue
 
+                # sem trabalho: espera “wake” OU timeout de fallback
+                try:
+                    await asyncio.wait_for(self._wake.wait(), timeout=self._poll_interval_s)
+                except asyncio.TimeoutError:
+                    pass
+                finally:
+                    self._wake.clear()
+
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(_loop())
+            
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
             with contextlib.suppress(Exception):
                 await self._task
             self._task = None
+
+        if self._lp_client:
+            with contextlib.suppress(Exception):
+                await self._lp_client.aclose()
+            self._lp_client = None
 
         self._uc = None
         self._logger.info("Signal executor loop stopped.")

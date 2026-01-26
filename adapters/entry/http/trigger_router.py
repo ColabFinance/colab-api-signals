@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, cast
 
 from fastapi import APIRouter, Depends, Request
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -63,12 +63,18 @@ async def candle_closed_trigger(
     market_data_base_url = _get_state_str(request.app, "market_data_base_url", "")
     pipeline_base_url = _get_state_str(request.app, "pipeline_base_url", "")
 
+    executor = getattr(request.app.state, "signal_executor", None)
+    signal_waker: Optional[Callable[[], None]] = None
+    if executor is not None:
+        signal_waker = cast(Callable[[], None], executor.wake)
+        
     uc = CandleClosedTriggerUseCase(
         db=db,
         market_data_base_url=market_data_base_url,
         pipeline_base_url=pipeline_base_url,
         max_concurrency=int(getattr(request.app.state, "trigger_max_concurrency", 10) or 10),
         logger=logger,
+        signal_waker=signal_waker
     )
 
     asyncio.create_task(
