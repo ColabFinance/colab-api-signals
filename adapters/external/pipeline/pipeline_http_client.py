@@ -269,8 +269,8 @@ class PipelineHttpClient:
         alias: str,
         token_in: str,
         token_out: str,
-        swap_amount_in: int = 0,
-        swap_amount_out_min: int = 0,
+        swap_amount_in: float = 0,
+        swap_amount_out_min: float = 0,
         sqrt_price_limit_x96: int = 0,
         gas_strategy: str = "buffered",
         lower_tick: Optional[int] = None,
@@ -290,8 +290,8 @@ class PipelineHttpClient:
           "fee": int,
           "token_in": "0x...",
           "token_out": "0x...",
-          "swap_amount_in": int,
-          "swap_amount_out_min": int,
+          "swap_amount_in": float,
+          "swap_amount_out_min": float,
           "sqrt_price_limit_x96": int,
           "gas_strategy": "buffered"
         }
@@ -306,8 +306,8 @@ class PipelineHttpClient:
             "fee": int(fee) if fee else None,
             "token_in": token_in,
             "token_out": token_out,
-            "swap_amount_in": int(swap_amount_in),
-            "swap_amount_out_min": int(swap_amount_out_min),
+            "swap_amount_in": swap_amount_in,
+            "swap_amount_out_min": swap_amount_out_min,
             "sqrt_price_limit_x96": int(sqrt_price_limit_x96 or 0),
             "gas_strategy": gas_strategy,
         }
