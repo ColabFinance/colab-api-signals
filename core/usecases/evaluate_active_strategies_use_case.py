@@ -427,6 +427,23 @@ class EvaluateActiveStrategiesUseCase:
                     major_pct = pct_above_base * 10
                     minor_pct = pct_below_base * 10
                 
+                band_params = {
+                    "skew_low_pct": float(params.get("skew_low_pct", 0.05)),
+                    "skew_high_pct": float(params.get("skew_high_pct", 0.05)),
+                    "standard_max_major_side_pct": float(params.get("standard_max_major_side_pct", 0.05)),
+                    "high_vol_max_major_side_pct": float(params.get("high_vol_max_major_side_pct", 2.0)),
+                    "tiers": list(params.get("tiers", [])),
+                }
+
+                # width_override já é usado no _pick_band; vamos persistir ele como width canônico do episódio
+                if width_override is not None:
+                    band_total_width_pct = float(width_override)
+                else:
+                    if initial_pool_type == "high_vol":
+                        band_total_width_pct = float(band_params["high_vol_max_major_side_pct"])
+                    else:
+                        band_total_width_pct = float(band_params["standard_max_major_side_pct"])
+                        
                 new_ep = StrategyEpisodeEntity(
                     id=f"ep_{strat_id}_{ts}",
                     strategy_id=strat_id,
@@ -441,6 +458,8 @@ class EvaluateActiveStrategiesUseCase:
                     open_price=P,
                     Pa=Pa,
                     Pb=Pb,
+                    band_total_width_pct=band_total_width_pct,
+                    band_params=band_params,
                     last_event_bar=0,
                     atr_streak={tier["name"]: 0 for tier in params.get("tiers", [])},
                     out_above_streak=0,
@@ -692,6 +711,14 @@ class EvaluateActiveStrategiesUseCase:
                     major_pct = pct_above_base*10
                     minor_pct = pct_below_base*10
                 
+                band_params = {
+                    "skew_low_pct": float(params.get("skew_low_pct", 0.05)),
+                    "skew_high_pct": float(params.get("skew_high_pct", 0.05)),
+                    "standard_max_major_side_pct": float(params.get("standard_max_major_side_pct", 0.05)),
+                    "high_vol_max_major_side_pct": float(params.get("high_vol_max_major_side_pct", 2.0)),
+                    "tiers": list(params.get("tiers", [])),
+                }
+                                
                 return StrategyEpisodeEntity(
                     id=f"ep_{strat_id}_{ts}",
                     strategy_id=strat_id,
@@ -706,6 +733,8 @@ class EvaluateActiveStrategiesUseCase:
                     open_price=P,
                     Pa=Pa_new,
                     Pb=Pb_new,
+                    band_total_width_pct=total_width_pct,
+                    band_params=band_params,
                     last_event_bar=0,
                     atr_streak={tier["name"]: 0 for tier in params.get("tiers", [])},
                     out_above_streak=0,
