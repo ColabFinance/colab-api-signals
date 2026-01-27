@@ -363,9 +363,8 @@ class EvaluateActiveStrategiesUseCase:
             return
 
         for strat in strategies:
-
             if strat.alias is None:
-                return
+                continue
             
             params = strat.params
             eps = float(params.get("eps", 1e-6))
@@ -571,7 +570,12 @@ class EvaluateActiveStrategiesUseCase:
                         atr_pct is not None
                         and chosen_th is not None
                         and atr_pct > chosen_th
-                        and pool_type_cur != "high_vol"
+                        and (
+                            pool_type_cur != "high_vol" or (
+                                pool_type_cur == "high_vol" and current.mode_on_open == "trend_up"
+                            )
+                        )
+                        
                     ):
                         trigger = "high_vol"
                 
