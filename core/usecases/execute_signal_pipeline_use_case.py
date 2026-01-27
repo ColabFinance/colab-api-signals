@@ -843,29 +843,12 @@ class ExecuteSignalPipelineUseCase:
         # ==========================
         try:
             if batch_res and last_episode_id and last_episode:
-                after = batch_res.get("after") or {}
-                before = batch_res.get("before") or {}
-                snapshot = after  # estado após unstake/exit/swap/open
-
-                # --------- snapshots de estado ---------
-                totals = snapshot.get("totals") or {}
-                vault_idle = snapshot.get("vault_idle") or {}
-                in_position = snapshot.get("in_position") or {}
-
-                # CAKE: sempre usar BEFORE (como você já fazia)
-                gauge_rewards = before.get("gauge_rewards") or {}
-                # rewards e fees: usar AFTER
-                rewards_collected_cum = snapshot.get("rewards_collected_cum") or {}
-                fees_uncollected = snapshot.get("fees_uncollected") or {}
-                fees_collected_cum = snapshot.get("fees_collected_cum") or {}
-                gauge_reward_balances = snapshot.get("gauge_reward_balances") or {}
-                
                 fees_uncollected_st = {}
                 fees_uncollected_st_usd = 0
                 gauge_rewards_st_usd = 0
                 if st:
                     fees_uncollected_st = st.get("fees_uncollected") or {}
-                    fees_uncollected_st_usd = fees_uncollected_st.get("usd", 0)
+                    fees_uncollected_st_usd = fees_uncollected_st.get("total_usd", 0)
                     gauge_rewards_st = st.get("gauge_rewards") or {}
                     gauge_rewards_st_usd = gauge_rewards_st.get("pending_usd_est", 0)
                 
@@ -873,15 +856,24 @@ class ExecuteSignalPipelineUseCase:
                 # -------------------------
                 # 1) Lifetime atual (fechamento da pool anterior) em tokens
                 # -------------------------
-                pending_cake = float(gauge_rewards.get("pending_amount") or 0.0)
-                pending_cake_usd_est = float(gauge_rewards.get("pending_usd_est") or 0.0)
+                pending_cake = 0.0
+                pending_cake_usd_est = 0.0
+                
+                if st:
+                    gauge_rewards = st.get("gauge_rewards") or {}
+                    pending_cake = float(gauge_rewards.get("pending_amount") or 0.0)
+                    pending_cake_usd_est = float(gauge_rewards.get("pending_usd_est") or 0.0)
 
                 # -------------------------
                 # 5) Conversão dos deltas -> USD (incluindo CAKE)
                 # -------------------------
-                prices = (snapshot.get("prices") or {})
-                p_t1_t0 = float(prices.get("p_t1_t0") or 0.0)
-                p_t0_t1 = float(prices.get("p_t0_t1") or (0.0 if p_t1_t0 == 0.0 else 1.0 / p_t1_t0))
+                p_t1_t0=0.0
+                p_t0_t1=0.0
+                if st:
+                    prices = (st.get("prices") or {})
+                    current_prices = (st.get("current") or {})
+                    p_t1_t0 = float(current_prices.get("p_t1_t0") or 0.0)
+                    p_t0_t1 = float(current_prices.get("p_t0_t1") or (0.0 if p_t1_t0 == 0.0 else 1.0 / p_t1_t0))
 
                 # busca status completo para descobrir quais tokens são USD-like
                 st_for_prices = await self._lp.get_status(alias)
@@ -915,7 +907,10 @@ class ExecuteSignalPipelineUseCase:
                 # -------------------------
                 # 6) APR (sempre numérico, APR em fração + em %)
                 # -------------------------
-                total_position_usd = float(in_position.get("usd") or 0.0)
+                total_position_usd = 0.0
+                if st:
+                    in_position = st.get("in_position") or {}
+                    total_position_usd = float(in_position.get("total_usd") or 0.0)
 
                 qty_candles = int(last_episode.get("last_event_bar") or 0)
                 out_above_streak_total = int(last_episode.get("out_above_streak_total") or 0)
@@ -1010,15 +1005,6 @@ class ExecuteSignalPipelineUseCase:
                 metrics = {
                     "episode_meta": episode_meta,
 
-                    "totals": totals,
-                    "vault_idle": vault_idle,
-                    "in_position": in_position,
-                    "gauge_rewards": gauge_rewards,
-                    "rewards_collected_cum": rewards_collected_cum,
-                    "gauge_reward_balances": gauge_reward_balances,
-                    "fees_uncollected": fees_uncollected,
-                    "fees_collected_cum": fees_collected_cum,
-
                     "fees_uncollected_st_usd": fees_uncollected_st_usd,
                     "gauge_rewards_st_usd": gauge_rewards_st_usd,
                     "fees_this_episode_usd": fees_this_episode_usd,
@@ -1033,7 +1019,7 @@ class ExecuteSignalPipelineUseCase:
                     "APR_daily_pct": APR_daily_pct,
                     "APR_annualy_pct": APR_annualy_pct,
                 }
-
+                
                 metrics_safe = sanitize_for_bson(metrics)
                 
                 # persiste métricas no episódio anterior (fechado)
