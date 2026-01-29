@@ -848,7 +848,7 @@ class ExecuteSignalPipelineUseCase:
                 gauge_rewards_st_usd = 0
                 if st:
                     fees_uncollected_st = st.get("fees_uncollected") or {}
-                    fees_uncollected_st_usd = fees_uncollected_st.get("total_usd", 0)
+                    fees_uncollected_st_usd = fees_uncollected_st.get("usd", 0)
                     gauge_rewards_st = st.get("gauge_rewards") or {}
                     gauge_rewards_st_usd = gauge_rewards_st.get("pending_usd_est", 0)
                 
@@ -908,9 +908,16 @@ class ExecuteSignalPipelineUseCase:
                 # 6) APR (sempre numérico, APR em fração + em %)
                 # -------------------------
                 total_position_usd = 0.0
+                total_vault_idle_usd = 0.0
+                totals_usd = 0.0
                 if st:
-                    in_position = st.get("in_position") or {}
+                    holdings = st.get("holdings") or {}
+                    in_position = holdings.get("in_position") or {}
                     total_position_usd = float(in_position.get("total_usd") or 0.0)
+                    vault_idle = holdings.get("vault_idle") or {}
+                    total_vault_idle_usd = float(vault_idle.get("total_usd") or 0.0)
+                    totals = holdings.get("totals") or {}
+                    totals_usd = float(totals.get("total_usd") or 0.0)
 
                 qty_candles = int(last_episode.get("last_event_bar") or 0)
                 out_above_streak_total = int(last_episode.get("out_above_streak_total") or 0)
@@ -1009,6 +1016,9 @@ class ExecuteSignalPipelineUseCase:
                     "gauge_rewards_st_usd": gauge_rewards_st_usd,
                     "fees_this_episode_usd": fees_this_episode_usd,
                     "price_cake_usd_ref": price_cake_usd,
+                    "total_position_usd": total_position_usd,
+                    "total_vault_idle_usd": total_vault_idle_usd,
+                    "totals_usd": totals_usd,
                     
                     "qty_candles": qty_candles,
                     "total_candle_out": total_candle_out,
