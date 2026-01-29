@@ -8,6 +8,19 @@ from core.domain.entities.strategy_episode_entity import StrategyEpisodeEntity
 from core.repositories.strategy_episode_repository import StrategyEpisodeRepository
 
 
+def _norm(s: Optional[str]) -> str:
+    return (s or "").strip().lower()
+
+
+def _norm_status(s: Optional[str]) -> Optional[str]:
+    if not s:
+        return None
+    v = (s or "").strip().upper()
+    if v not in ("OPEN", "CLOSED"):
+        return None
+    return v
+
+
 class StrategyEpisodeRepositoryMongoDB(StrategyEpisodeRepository):
     """
     Mongo implementation for strategy episodes (bands).
@@ -21,6 +34,9 @@ class StrategyEpisodeRepositoryMongoDB(StrategyEpisodeRepository):
     async def ensure_indexes(self) -> None:
         await self._col.create_index([("strategy_id", 1), ("status", 1)], name="ix_strategy_status")
         await self._col.create_index([("strategy_id", 1), ("open_time", -1)], name="ix_strategy_open_time")
+
+        await self._col.create_index([("dex", 1), ("alias", 1), ("open_time", -1)], name="ix_dex_alias_open_time")
+        await self._col.create_index([("dex", 1), ("alias", 1), ("status", 1), ("open_time", -1)], name="ix_dex_alias_status_open_time")
 
     async def get_open_by_strategy(self, strategy_id: str) -> Optional[StrategyEpisodeEntity]:
         doc = await self._col.find_one({"strategy_id": strategy_id, "status": "OPEN"})
@@ -92,3 +108,28 @@ class StrategyEpisodeRepositoryMongoDB(StrategyEpisodeRepository):
             {"_id": episode_id},
             {"$push": {"execution_log": final_log}},
         )
+
+    async def list_by_vault(
+        self,
+        *,
+        dex: str,
+        alias: str,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[StrategyEpisodeEntity | None]:
+        q: Dict[str, Any] = {"dex": _norm(dex), "alias": (alias or "").strip()}
+        st = _norm_status(status)
+        if st:
+            q["status"] = st
+
+        cursor = self._col.find(q).sort("open_time", -1).skip(int(offset or 0)).limit(int(limit or 50))
+        docs = await cursor.to_list(length=int(limit or 50))
+        return [StrategyEpisodeEntity.from_mongo(d) for d in docs if d]
+
+    async def count_by_vault(self, *, dex: str, alias: str, status: Optional[str] = None) -> int:
+        q: Dict[str, Any] = {"dex": _norm(dex), "alias": (alias or "").strip()}
+        st = _norm_status(status)
+        if st:
+            q["status"] = st
+        return int(await self._col.count_documents(q))

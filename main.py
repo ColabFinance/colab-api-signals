@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from adapters.entry.http.trigger_router import router as triggers_router
 from adapters.entry.http.strategy_router import router as strategy_params_router
+from adapters.entry.http.strategy_episode_router import router as episodes_router
 
 from adapters.external.database.mongodb_client import get_mongo_client
 from config.settings import settings
@@ -93,7 +94,7 @@ app.add_middleware(
 
 app.include_router(strategy_params_router, prefix="/api")
 app.include_router(triggers_router, prefix="/api")
-
+app.include_router(episodes_router, prefix="/api")
 
 @app.get("/healthz")
 async def healthz():
