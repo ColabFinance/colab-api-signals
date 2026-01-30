@@ -571,9 +571,12 @@ class EvaluateActiveStrategiesUseCase:
                         and chosen_th is not None
                         and atr_pct > chosen_th
                         and (
-                            pool_type_cur != "high_vol" or (
-                                pool_type_cur == "high_vol" and current.mode_on_open == "trend_up"
-                            )
+                            pool_type_cur != "high_vol" 
+                            # or (
+                            #     pool_type_cur == "high_vol" 
+                            #     and current.mode_on_open == "trend_up"
+                            #     and trend_now == "down"
+                            # )
                         )
                         
                     ):
