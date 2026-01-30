@@ -1,55 +1,121 @@
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from pymongo.errors import DuplicateKeyError
 from core.domain.entities.strategy_entity import StrategyEntity
 from core.repositories.strategy_repository import StrategyRepository
 
 
 class StrategyRepositoryMongoDB(StrategyRepository):
-    """
-    Mongo implementation for strategies.
-    """
-
     COLLECTION = "strategies"
 
     def __init__(self, db: AsyncIOMotorDatabase):
         self._col = db[self.COLLECTION]
+
+    def _clean_set(self, doc: dict) -> dict:
+        # do not overwrite existing fields with None
+        return {k: v for k, v in (doc or {}).items() if v is not None}
 
     async def ensure_indexes(self) -> None:
         await self._col.create_index([("status", 1), ("symbol", 1)], name="ix_status_symbol")
         await self._col.create_index([("indicator_set_id", 1), ("status", 1)], name="ix_set_status")
         await self._col.create_index([("name", 1), ("symbol", 1)], unique=True, name="ux_name_symbol")
 
-    async def upsert(self, strategy: StrategyEntity) -> StrategyEntity:
+        await self._col.create_index(
+            [("chain", 1), ("owner", 1), ("strategy_id", 1)],
+            unique=True,
+            name="ux_chain_owner_strategy_id",
+            partialFilterExpression={
+                "chain": {"$exists": True},
+                "owner": {"$exists": True},
+                "strategy_id": {"$exists": True},
+            },
+        )
+
+    def _now(self) -> tuple[int, str]:
         now_ms = int(time.time() * 1000)
         now_iso = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+        return now_ms, now_iso
+
+    async def upsert(self, strategy: StrategyEntity) -> StrategyEntity:
+        now_ms, now_iso = self._now()
 
         doc = strategy.to_mongo()
         key = {"name": strategy.name, "symbol": strategy.symbol}
+        
+        set_doc = self._clean_set(doc)
+        
         update = {
             "$set": {
-                **doc,
+                **set_doc,
                 "updated_at": now_ms,
+                "updated_at_iso": now_iso,
             },
             "$setOnInsert": {
                 "created_at": now_ms,
                 "created_at_iso": now_iso,
             },
         }
-        await self._col.update_one(key, update, upsert=True)
+        try:
+            await self._col.update_one(key, update, upsert=True)
+        except DuplicateKeyError as e:
+            # collide on ux_name_symbol (name+symbol)
+            raise ValueError("DUPLICATE_NAME_SYMBOL") from e
         found = await self._col.find_one(key)
         return StrategyEntity.from_mongo(found)
 
+    async def upsert_by_onchain_identity(self, strategy: StrategyEntity) -> StrategyEntity:
+        if not strategy.chain or not strategy.owner or not strategy.strategy_id:
+            # fallback
+            return await self.upsert(strategy)
+
+        now_ms, now_iso = self._now()
+
+        doc = strategy.to_mongo()
+        key = {"chain": strategy.chain, "owner": strategy.owner, "strategy_id": int(strategy.strategy_id)}
+        
+        set_doc = self._clean_set(doc)
+        
+        update = {
+            "$set": {
+                **set_doc,
+                "updated_at": now_ms,
+                "updated_at_iso": now_iso,
+            },
+            "$setOnInsert": {
+                "created_at": now_ms,
+                "created_at_iso": now_iso,
+            },
+        }
+        try:
+            await self._col.update_one(key, update, upsert=True)
+        except DuplicateKeyError as e:
+            # collide on ux_name_symbol (name+symbol)
+            raise ValueError("DUPLICATE_NAME_SYMBOL") from e
+        found = await self._col.find_one(key)
+        return StrategyEntity.from_mongo(found)
+
+    async def get_by_onchain_identity(self, chain: str, owner: str, strategy_id: int) -> Optional[StrategyEntity]:
+        doc = await self._col.find_one({"chain": chain, "owner": owner, "strategy_id": int(strategy_id)})
+        return StrategyEntity.from_mongo(doc)
+
     async def get_active_by_indicator_set(self, indicator_set_id: str) -> List[StrategyEntity]:
-        cursor = self._col.find(
-            {"indicator_set_id": indicator_set_id, "status": "ACTIVE"},
-        )
+        cursor = self._col.find({"indicator_set_id": indicator_set_id, "status": "ACTIVE"})
         docs = await cursor.to_list(length=None)
         return [StrategyEntity.from_mongo(d) for d in docs if d]
 
-    async def get_by_id(self, strategy_id: str) -> Optional[StrategyEntity]:
-        doc = await self._col.find_one({"_id": strategy_id})
-        return StrategyEntity.from_mongo(doc)
+    async def exists_by_name_symbol(self, name: str, symbol: str) -> bool:
+        doc = await self._col.find_one({"name": name, "symbol": symbol}, {"_id": 1})
+        return bool(doc)
+    
+    async def list_by_owner_chain(self, chain: str, owner: str, status: Optional[str] = None) -> List[StrategyEntity]:
+        q: dict = {"chain": chain, "owner": owner}
+        if status:
+            q["status"] = status
+
+        cursor = self._col.find(q).sort([("strategy_id", 1), ("created_at", 1)])
+        docs = await cursor.to_list(length=None)
+        return [StrategyEntity.from_mongo(d) for d in docs if d]

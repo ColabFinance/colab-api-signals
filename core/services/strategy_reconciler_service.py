@@ -40,10 +40,6 @@ class StrategyReconcilerService:
 
         Or None if LP is already aligned.
         """
-
-        Pa_des = float(desired.Pa)
-        Pb_des = float(desired.Pb)
-
         dex = desired.dex
         alias = desired.alias
 
@@ -52,38 +48,19 @@ class StrategyReconcilerService:
         # pull live vault status so we know if position exists / is aligned
         lp_status = None
         if dex and alias:
-            lp_status = await self._lp.get_status(dex=dex, alias=alias)
+            lp_status = await self._lp.get_status(alias)
 
         # No LP or no position yet -> first time open
         if not lp_status or not lp_status.get("pool"):
             if dex and alias:
-                # temos vault configurado, mas ainda não tem posição ativa
                 steps = [
-                    {
-                        "action": "OPEN",
-                        "payload": {
-                            "dex": dex,
-                            "alias": alias,
-                            "lower_price": Pa_des,
-                            "upper_price": Pb_des,
-                            # ticks / ticks serão decididos em runtime pelo executor
-                        },
-                    }
+                    {"action": "OPEN", "payload": {"dex": dex, "alias": alias, "dynamic_range": True}}
                 ]
                 if gauge_flow:
                     steps.append({"action": "STAKE", "payload": {"dex": dex, "alias": alias}})
-                    
             else:
-                # não temos dex/alias => não tem infra. Registrar intenção apenas.
                 steps = [
-                    {
-                        "action": "NOOP_LEGACY",
-                        "payload": {
-                            "reason": "FIRST_OPEN_NO_VAULT",
-                            "lower_price": Pa_des,
-                            "upper_price": Pb_des,
-                        },
-                    }
+                    {"action": "NOOP_LEGACY", "payload": {"reason": "FIRST_OPEN_NO_VAULT"}}
                 ]
 
             return {
@@ -94,80 +71,41 @@ class StrategyReconcilerService:
                 "symbol": symbol,
             }
 
-        # Try to read current band
-        prices_cur = lp_status.get("prices", {}) or {}
-        lower_cur = prices_cur.get("lower", {}) or {}
-        upper_cur = prices_cur.get("upper", {}) or {}
-
-        Pa_lp = lower_cur.get("p_t1_t0")
-        Pb_lp = upper_cur.get("p_t1_t0")
-
-        tol = 1e-9
-        aligned = (
-            Pa_lp is not None
-            and Pb_lp is not None
-            and abs(Pa_lp - Pa_des) <= tol
-            and abs(Pb_lp - Pb_des) <= tol
-        )
-        if aligned:
-            # nothing to do
-            return None
-
-        # Not aligned -> full rotate plan
         return self._build_full_plan(
             dex=dex,
             alias=alias,
-            Pa_des=Pa_des,
-            Pb_des=Pb_des,
             strategy_id=strategy_id,
             desired=desired,
             symbol=symbol,
-            reason="RANGE_MISMATCH_OR_REDEPLOY",
+            reason="DYNAMIC_RANGE_ROTATION",
         )
 
     def _build_full_plan(
         self,
         dex: Optional[str],
         alias: Optional[str],
-        Pa_des: float,
-        Pb_des: float,
         strategy_id: str,
         desired: StrategyEpisodeEntity,
         symbol: str,
         reason: str,
     ) -> Dict:
-        """
-        Build canonical rotation steps with WITHDRAW included.
-        If dex/alias is missing, we can't actually call vault API, so fall back to NOOP.
-        """
         steps: List[Dict] = []
         gauge_flow = bool(desired.gauge_flow_enabled)
-        
+
         if dex and alias:
             if gauge_flow:
-                # fluxo com gauge
-                steps.append({"action": "BATCH_REQUEST", "payload": {"dex": dex, "alias": alias,
-                                                                        "lower_price": Pa_des, "upper_price": Pb_des}})  
-                
-                # steps.append({"action": "SWAP_EXACT_IN_REWARD", "payload": {"dex": dex, "alias": alias,
-                                                                        # "lower_price": Pa_des, "upper_price": Pb_des}})  
-                # if dex == "pancake":
-                #     steps.append({"action": "COLLECT", "payload": {"dex": dex, "alias": alias}})                  
-                
+                steps.append({"action": "BATCH_REQUEST", "payload": {"dex": dex, "alias": alias, "dynamic_range": True}})
             else:
                 steps.append({"action": "COLLECT", "payload": {"dex": dex, "alias": alias}})
                 steps.append({"action": "WITHDRAW", "payload": {"dex": dex, "alias": alias, "mode": "pool"}})
-                steps.append({"action": "SWAP_EXACT_IN", "payload": {"dex": dex, "alias": alias,
-                                                                     "lower_price": Pa_des, "upper_price": Pb_des}})
-                steps.append({"action": "OPEN", "payload": {"dex": dex, "alias": alias,
-                                                            "lower_price": Pa_des, "upper_price": Pb_des}})
+                steps.append({"action": "SWAP_EXACT_IN", "payload": {"dex": dex, "alias": alias, "dynamic_range": True}})
+                steps.append({"action": "OPEN", "payload": {"dex": dex, "alias": alias, "dynamic_range": True}})
         else:
-            steps.append({"action": "NOOP_LEGACY", "payload": {
-                "reason": reason, "lower_price": Pa_des, "upper_price": Pb_des}})
+            steps.append({"action": "NOOP_LEGACY", "payload": {"reason": reason}})
 
         return {
             "strategy_id": strategy_id,
-            "signal_type": "ROTATE_RANGE" if gauge_flow else "ROTATE_RANGE",
+            "signal_type": "ROTATE_RANGE",
             "steps": steps,
             "episode": desired,
             "symbol": symbol,

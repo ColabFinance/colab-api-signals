@@ -1,6 +1,6 @@
 from datetime import datetime, time, timezone
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from adapters.external.pipeline.pipeline_http_client import PipelineHttpClient
 from core.domain.entities.signal_entity import SignalEntity, SignalStep
@@ -13,7 +13,6 @@ from ..services.strategy_reconciler_service import StrategyReconcilerService
 from ..repositories.strategy_repository import StrategyRepository
 from ..repositories.strategy_episode_repository import StrategyEpisodeRepository
 from ..repositories.signal_repository import SignalRepository
-from ..repositories.indicator_set_repository import IndicatorSetRepository
 
 # LOW-VOL WINDOWS (hardcoded por enquanto; futuramente virá de Strategy.params["low_vol_keys"])
 LOW_VOL_KEYS_DEFAULT = {
@@ -68,6 +67,7 @@ class EvaluateActiveStrategiesUseCase:
         reconciling_service: StrategyReconcilerService,
         lp_client: PipelineHttpClient,
         logger: Optional[logging.Logger] = None,
+        on_signal_created: Optional[Callable[[], None]] = None,
     ):
         self._strategy_repo = strategy_repo
         self._episode_repo = episode_repo
@@ -75,6 +75,7 @@ class EvaluateActiveStrategiesUseCase:
         self._reconciler = reconciling_service
         self._lp_client = lp_client
         self._logger = logger or logging.getLogger(self.__class__.__name__)
+        self._on_signal_created = on_signal_created
 
     @staticmethod
     def _trend_at(ema_fast_val: float, ema_slow_val: float) -> str:
@@ -251,52 +252,6 @@ class EvaluateActiveStrategiesUseCase:
 
         return P_pool, Pa_pool, Pb_pool
 
-    async def _try_override_from_pool(
-        self,
-        *,
-        params: Dict,
-        P: float,
-        Pa: float,
-        Pb: float,
-    ) -> Tuple[float, float, float, bool]:
-        """
-        Attempts to override (P,Pa,Pb) from pool status.
-        Returns (P_out, Pa_out, Pb_out, overridden_flag).
-        """
-        dex = params.get("dex", "") or ""
-        alias = params.get("alias", "") or ""
-
-        try:
-            st = await self._lp_client.get_status(dex, alias)
-        except Exception as exc:
-            self._logger.warning(
-                "lp_client.get_status failed; keeping Binance/episode values. dex=%s alias=%s err=%s",
-                dex,
-                alias,
-                exc,
-            )
-            return P, Pa, Pb, False
-
-        if not st:
-            return P, Pa, Pb, False
-
-        try:
-            p_pool, pa_pool, pb_pool = self._parse_pool_status(st)
-            if p_pool is not None:
-                P = p_pool
-            if pa_pool is not None and pb_pool is not None:
-                Pa, Pb = pa_pool, pb_pool
-            return P, Pa, Pb, True
-        except Exception as exc:
-            self._logger.warning(
-                "invalid status payload; keeping Binance/episode values. dex=%s alias=%s err=%s status=%s",
-                dex,
-                alias,
-                exc,
-                st,
-            )
-            return P, Pa, Pb, False
-        
     async def _pick_band_for_trend_totalwidth(
         self,
         P: float,
@@ -408,6 +363,9 @@ class EvaluateActiveStrategiesUseCase:
             return
 
         for strat in strategies:
+            if strat.alias is None:
+                continue
+            
             params = strat.params
             eps = float(params.get("eps", 1e-6))
             cooloff = int(params.get("cooloff_bars", 1))
@@ -468,6 +426,23 @@ class EvaluateActiveStrategiesUseCase:
                     major_pct = pct_above_base * 10
                     minor_pct = pct_below_base * 10
                 
+                band_params = {
+                    "skew_low_pct": float(params.get("skew_low_pct", 0.05)),
+                    "skew_high_pct": float(params.get("skew_high_pct", 0.05)),
+                    "standard_max_major_side_pct": float(params.get("standard_max_major_side_pct", 0.05)),
+                    "high_vol_max_major_side_pct": float(params.get("high_vol_max_major_side_pct", 2.0)),
+                    "tiers": list(params.get("tiers", [])),
+                }
+
+                # width_override já é usado no _pick_band; vamos persistir ele como width canônico do episódio
+                if width_override is not None:
+                    band_total_width_pct = float(width_override)
+                else:
+                    if initial_pool_type == "high_vol":
+                        band_total_width_pct = float(band_params["high_vol_max_major_side_pct"])
+                    else:
+                        band_total_width_pct = float(band_params["standard_max_major_side_pct"])
+                        
                 new_ep = StrategyEpisodeEntity(
                     id=f"ep_{strat_id}_{ts}",
                     strategy_id=strat_id,
@@ -482,14 +457,16 @@ class EvaluateActiveStrategiesUseCase:
                     open_price=P,
                     Pa=Pa,
                     Pb=Pb,
+                    band_total_width_pct=band_total_width_pct,
+                    band_params=band_params,
                     last_event_bar=0,
                     atr_streak={tier["name"]: 0 for tier in params.get("tiers", [])},
                     out_above_streak=0,
                     out_below_streak=0,
                     out_above_streak_total=0,
                     out_below_streak_total=0,
-                    dex=params.get("dex"),
-                    alias=params.get("alias"),
+                    dex=strat.dex,
+                    alias=strat.alias,
                     token0_address=params.get("token0_address"),
                     token1_address=params.get("token1_address"),
                     gauge_flow_enabled=gauge_flow_enabled,
@@ -513,6 +490,8 @@ class EvaluateActiveStrategiesUseCase:
                         last_episode=None,
                     )
                     await self._signal_repo.upsert_signal(signal)
+                    if self._on_signal_created:
+                        self._on_signal_created()
                 continue
 
             # defaults de campos antigos
@@ -544,23 +523,11 @@ class EvaluateActiveStrategiesUseCase:
             atr_streaks: Dict = dict(current.atr_streak)
             
             trigger: Optional[str] = None
-            trigger_from_periodic_pool_check = False
+            # trigger_from_periodic_pool_check = False
             
             # 2) primeiro: decide se vale a pena consultar o pool
             in_range_now = self._is_in_range(P, Pa_cur, Pb_cur, eps)
 
-            # se Binance acusou fora do range, tenta confirmar com status da pool
-            if not in_range_now:
-                P, Pa_cur, Pb_cur, _ = await self._try_override_from_pool(
-                    params=params,
-                    P=P,
-                    Pa=Pa_cur,
-                    Pb=Pb_cur,
-                )
-
-                # reavalia range com os valores possivelmente corrigidos pela pool
-                in_range_now = self._is_in_range(P, Pa_cur, Pb_cur, eps)
-                
            # 2b) agora sim: atualiza streaks usando P/Pa/Pb "definitivos" (pool quando necessário)
             out_above_streak, out_below_streak, out_above_streak_total, out_below_streak_total = self._update_breakout_streaks(
                 P, Pa_cur, Pb_cur, eps,
@@ -568,36 +535,6 @@ class EvaluateActiveStrategiesUseCase:
                 out_above_streak_total, out_below_streak_total,
             )
 
-            # Pperiodic pool truth check using i_since_open + breakout_confirm ---
-            # Rule: if i_since_open % breakout_confirm == 0 -> check pool and if pool is out, trigger breakout.
-            # IMPORTANT: do NOT do it when locked (forced_high_vol_down_locked).
-            do_periodic_pool_check = (
-                (not forced_high_vol_down_locked)
-                and breakout_confirm > 0
-                and (i_since_open % (breakout_confirm + 10) == 0)
-            )
-            
-            if do_periodic_pool_check:
-                P_pool, Pa_pool, Pb_pool, got_pool = await self._try_override_from_pool(
-                    params=params,
-                    P=P,
-                    Pa=Pa_cur,
-                    Pb=Pb_cur,
-                )
-                if got_pool:
-                    # If pool says OUT, behave like breakout (cross_min/cross_max)
-                    if P_pool > Pb_pool * (1.0 + eps):
-                        trigger = "cross_max"
-                        trigger_from_periodic_pool_check = True
-                        P, Pa_cur, Pb_cur = P_pool, Pa_pool, Pb_pool
-                    elif P_pool < Pa_pool * (1.0 - eps):
-                        trigger = "cross_min"
-                        trigger_from_periodic_pool_check = True
-                        P, Pa_cur, Pb_cur = P_pool, Pa_pool, Pb_pool
-
-                    # refresh in_range_now after pool truth (for tiers logic)
-                    in_range_now = self._is_in_range(P, Pa_cur, Pb_cur, eps)
-                    
             # persiste os contadores mesmo sem evento
             await self._episode_repo.update_partial(current.id, {
                 "out_above_streak": out_above_streak,
@@ -633,7 +570,15 @@ class EvaluateActiveStrategiesUseCase:
                         atr_pct is not None
                         and chosen_th is not None
                         and atr_pct > chosen_th
-                        and pool_type_cur != "high_vol"
+                        and (
+                            pool_type_cur != "high_vol" 
+                            # or (
+                            #     pool_type_cur == "high_vol" 
+                            #     and current.mode_on_open == "trend_up"
+                            #     and trend_now == "down"
+                            # )
+                        )
+                        
                     ):
                         trigger = "high_vol"
                 
@@ -694,23 +639,6 @@ class EvaluateActiveStrategiesUseCase:
             
             # 5) sem gatilho -> segue
             if not trigger:
-                continue
-            
-            # override P + (Pa_cur, Pb_cur) with real price/range from pool status (best-effort; fallback to episode/Binance)
-            P, Pa_cur, Pb_cur, p_from_pool = await self._try_override_from_pool(
-                params=params,
-                P=P,
-                Pa=Pa_cur,
-                Pb=Pb_cur,
-            )
-
-            # Cancel trigger only if cross range and in range inside of the position yet.
-            if (
-                (not trigger_from_periodic_pool_check)
-                and trigger in ("cross_min", "cross_max") 
-                and p_from_pool 
-                and self._is_in_range(P, Pa_cur, Pb_cur, eps)
-            ):
                 continue
 
             # 6) fechar episódio atual
@@ -790,6 +718,14 @@ class EvaluateActiveStrategiesUseCase:
                     major_pct = pct_above_base*10
                     minor_pct = pct_below_base*10
                 
+                band_params = {
+                    "skew_low_pct": float(params.get("skew_low_pct", 0.05)),
+                    "skew_high_pct": float(params.get("skew_high_pct", 0.05)),
+                    "standard_max_major_side_pct": float(params.get("standard_max_major_side_pct", 0.05)),
+                    "high_vol_max_major_side_pct": float(params.get("high_vol_max_major_side_pct", 2.0)),
+                    "tiers": list(params.get("tiers", [])),
+                }
+                                
                 return StrategyEpisodeEntity(
                     id=f"ep_{strat_id}_{ts}",
                     strategy_id=strat_id,
@@ -804,14 +740,16 @@ class EvaluateActiveStrategiesUseCase:
                     open_price=P,
                     Pa=Pa_new,
                     Pb=Pb_new,
+                    band_total_width_pct=total_width_pct,
+                    band_params=band_params,
                     last_event_bar=0,
                     atr_streak={tier["name"]: 0 for tier in params.get("tiers", [])},
                     out_above_streak=0,
                     out_below_streak=0,
                     out_above_streak_total=0,
                     out_below_streak_total=0,
-                    dex=params.get("dex"),
-                    alias=params.get("alias"),
+                    dex=strat.dex,
+                    alias=strat.alias,
                     token0_address=params.get("token0_address"),
                     token1_address=params.get("token1_address"),
                     gauge_flow_enabled=gauge_flow_enabled,
@@ -907,3 +845,5 @@ class EvaluateActiveStrategiesUseCase:
                     last_episode=current,
                 )
                 await self._signal_repo.upsert_signal(signal)
+                if self._on_signal_created:
+                    self._on_signal_created()

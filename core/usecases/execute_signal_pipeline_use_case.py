@@ -2,13 +2,14 @@ import asyncio
 import json
 import logging
 from math import sqrt
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from adapters.external.notify.telegram_notifier import TelegramNotifier
 from core.common.utils import sanitize_for_bson
 from core.domain.entities.signal_entity import SignalEntity
 from core.repositories.strategy_episode_repository import StrategyEpisodeRepository
 from core.services.idempotency_key_service import IdempotencyKeyService
+from core.usecases.evaluate_active_strategies_use_case import EvaluateActiveStrategiesUseCase
 
 from ..repositories.signal_repository import SignalRepository
 from adapters.external.pipeline.pipeline_http_client import PipelineHttpClient
@@ -54,6 +55,7 @@ class ExecuteSignalPipelineUseCase:
         self._notifier = notifier
         self._idempotency = idempotency_service or IdempotencyKeyService()
         self._locks: dict[str, asyncio.Lock] = {}
+
         self._locks_lock = asyncio.Lock()  # pra criar locks de forma segura
         self._max_parallel = max_parallel
         self._semaphore = asyncio.Semaphore(self._max_parallel)
@@ -126,13 +128,93 @@ class ExecuteSignalPipelineUseCase:
             denom = self.EPS_POS
         return total_P / denom
 
-    async def execute_once(self) -> None:
+    async def _compute_dynamic_range_after_status(
+        self,
+        st: Dict,
+        episode: Dict,
+    ) -> Tuple[float, float, Dict[str, Any]]:
+        """
+        Recalcula (Pa, Pb) SEMPRE depois do get_status() (evita defasagem).
+
+        - Retorna Pa/Pb na escala HUMANA (USD por risco quando houver USD em um lado).
+        - Reaproveita EvaluateActiveStrategiesUseCase._pick_band_for_trend_totalwidth.
+        """
+        prices = (st.get("prices") or {})
+        cur = (prices.get("current") or {})
+        p_t1_t0_spot = float(cur.get("p_t1_t0") or 0.0)
+        if p_t1_t0_spot <= 0.0:
+            raise RuntimeError("spot_price_unavailable")
+        p_t0_t1_spot = 1.0 / p_t1_t0_spot
+
+        holdings = (st.get("holdings") or {})
+        syms = (holdings.get("symbols") or {})
+        sym0 = (syms.get("token0") or "").upper()
+        sym1 = (syms.get("token1") or "").upper()
+
+        token0_is_usd = self._is_usd(sym0)
+        token1_is_usd = self._is_usd(sym1)
+
+        # escala humana (igual seu BATCH_REQUEST)
+        if token0_is_usd and not token1_is_usd:
+            P_h = p_t0_t1_spot
+            human_is_t0_t1 = True
+        else:
+            P_h = p_t1_t0_spot
+            human_is_t0_t1 = False
+
+        mode_on_open = (episode.get("mode_on_open") or "").lower()
+        trend_for_pick = "down" if "down" in mode_on_open else "up"
+
+        pool_type = episode.get("pool_type") or "standard"
+
+        band_params = dict(episode.get("band_params") or {})
+        band_params.setdefault("skew_low_pct", 0.075)
+        band_params.setdefault("skew_high_pct", 0.025)
+        band_params.setdefault("standard_max_major_side_pct", 0.05)
+        band_params.setdefault("high_vol_max_major_side_pct", 2.0)
+        band_params.setdefault("tiers", [])
+
+        total_width_override = episode.get("band_total_width_pct")
+        if total_width_override is None:
+            if pool_type == "high_vol":
+                total_width_override = band_params.get("high_vol_max_major_side_pct")
+            elif pool_type == "standard" or pool_type is None:
+                total_width_override = band_params.get("standard_max_major_side_pct")
+            else:
+                total_width_override = band_params.get("max_major_side_pct")
+
+        picker = EvaluateActiveStrategiesUseCase.__new__(EvaluateActiveStrategiesUseCase)
+        Pa_h, Pb_h, _, _, _, _, _ = await picker._pick_band_for_trend_totalwidth(
+            P=float(P_h),
+            trend=trend_for_pick,
+            params=band_params,
+            atr_pct_now=None,
+            total_width_override=float(total_width_override) if total_width_override is not None else None,
+            pool_type=pool_type,
+        )
+
+        Pa_h = float(Pa_h)
+        Pb_h = float(Pb_h)
+        if Pa_h > Pb_h:
+            Pa_h, Pb_h = Pb_h, Pa_h
+
+        ctx = {
+            "P_h": float(P_h),
+            "human_is_t0_t1": bool(human_is_t0_t1),
+            "token0_is_usd": bool(token0_is_usd),
+            "token1_is_usd": bool(token1_is_usd),
+            "p_t1_t0_spot": float(p_t1_t0_spot),
+            "p_t0_t1_spot": float(p_t0_t1_spot),
+        }
+        return Pa_h, Pb_h, ctx
+    
+    async def execute_once(self) -> bool:
         """
         Fetch up to N pending signals and attempt to execute them.
         """
         pending: List[SignalEntity] = await self._signal_repo.list_pending(limit=50)
         if not pending:
-            return
+            return False
         
         tasks = []
         for sig in pending:
@@ -140,6 +222,8 @@ class ExecuteSignalPipelineUseCase:
         
         # executa tudo em paralelo, respeitando semaphore global
         await asyncio.gather(*tasks, return_exceptions=False)
+        
+        return True
     
     async def _run_single_with_locks(self, sig: SignalEntity) -> None:
         """
@@ -285,14 +369,11 @@ class ExecuteSignalPipelineUseCase:
                     
                     elif action == "BATCH_REQUEST":
                         # after withdraw, capital is idle in vault.
-                        st = await self._lp.get_status(dex, alias)
+                        st = await self._lp.get_status(alias)
                         if not st:
                             raise RuntimeError("status_unavailable_before_swap")
                         
-                        lower_price = step["payload"].get("lower_price")
-                        upper_price = step["payload"].get("upper_price")
-                        if lower_price is None or upper_price is None:
-                            raise RuntimeError("range_prices_required")
+                        lower_price, upper_price, rctx = await self._compute_dynamic_range_after_status(st, episode)
                         
                         holdings = st.get("holdings", {}) or {}
                         totals = holdings.get("totals", {}) or {}
@@ -325,17 +406,15 @@ class ExecuteSignalPipelineUseCase:
                         if Pa_h > Pb_h:
                             Pa_h, Pb_h = Pb_h, Pa_h
 
+                        P_h = float(rctx["P_h"])
                         if token0_is_usd and not token1_is_usd:
                             # par USDC/CRYPTO → humano é p_t0_t1
-                            P_h = p_t0_t1_spot
                             human_is_t0_t1 = True
                         elif token1_is_usd and not token0_is_usd:
                             # par CRYPTO/USDC → humano é p_t1_t0
-                            P_h = p_t1_t0_spot
                             human_is_t0_t1 = False
                         else:
                             # sem USD: mantemos humano como p_t1_t0
-                            P_h = p_t1_t0_spot
                             human_is_t0_t1 = False
                         
                         # ---------- Valoração em USD na escala humana ----------
@@ -494,7 +573,7 @@ class ExecuteSignalPipelineUseCase:
                         amount_in_tokens = abs(falta_usd) / max(usd_per_in, 1e-18)
                         
                         # --------------- Teto por saldo disponível do token_in ---------------
-                        bal_in_tokens = amt1 if token_in_addr.lower() == (t1_addr or "").lower() else amt0
+                        bal_in_tokens = amt1 if (token_in_addr and token_in_addr.lower() == (t1_addr or "").lower()) else amt0
                         if amount_in_tokens > bal_in_tokens:
                             amount_in_tokens = bal_in_tokens
 
@@ -538,16 +617,18 @@ class ExecuteSignalPipelineUseCase:
                             success = True
                             break
 
-                        batch_res = await self._lp.post_pancake_batch_unstake_exit_swap_open(
+                        batch_res = await self._lp.post_auto_rebalance_pancake(
                             alias=alias,
-                            token_in=token_in_addr,
-                            token_out=token_out_addr,
-                            amount_in=amount_in_tokens,   # unidades do token_in
-                            amount_in_usd=None,           # evitar restrição ETH/USDC
                             lower_price=lower_price,
                             upper_price=upper_price,
+                            token_in=token_in_addr,
+                            token_out=token_out_addr,
+                            swap_amount_in=amount_in_tokens,
+                            swap_amount_out_min=0,
+                            gas_strategy="buffered",
                             idempotency_key=idem_key,
                         )
+
                         await self._append_log(
                             episode_id,
                             {
@@ -565,326 +646,28 @@ class ExecuteSignalPipelineUseCase:
                         )
                         if batch_res is None:
                             raise RuntimeError("swap_failed")
-                        success = True
-                        
-                    elif action == "UNSTAKE":
-                        # só desestaca se status indica que há gauge e está staked
-                        st = await self._lp.get_status(dex, alias)
-                        if not st:
-                            raise RuntimeError("status_unavailable_before_unstake")
 
-                        if bool(st.get("has_gauge")) and (st.get("staked") or st.get("position_location") == "gauge"):
-                            res = await self._lp.post_unstake(dex, alias, idempotency_key=idem_key,)
-                            await self._append_log(episode_id, {
-                                "step": action, "phase": "unstake_call",
-                                "attempt": attempt + 1, "request": {"dex": dex, "alias": alias},
-                                "response": res,
-                            })
-                            if res is None:
-                                raise RuntimeError("unstake_failed")
-                        else:
-                            await self._append_log(episode_id, {
-                                "step": action, "phase": "skip_no_stake",
-                                "attempt": attempt + 1,
-                                "reason": "no gauge or already unstaked",
-                            })
-                        success = True
-                    
-                    elif action == "COLLECT":
-                        st = await self._lp.get_status(dex, alias)
-                        if not st:
-                            raise RuntimeError("status_unavailable_before_swap")
-                        
-                        position_location = st.get("position_location", None)
-                        if position_location == "pool":
-                            res = await self._lp.post_collect(dex, alias, idempotency_key=idem_key,)
-                            await self._append_log(
-                                episode_id,
-                                {
-                                    "step": action,
-                                    "attempt": attempt + 1,
-                                    "request": {"dex": dex, "alias": alias},
-                                    "response": res,
-                                },
-                            )
-                            if res is None:
-                                raise RuntimeError("collect_failed")
-                        
-                        success = True
-                            
-                    elif action == "WITHDRAW":
-                        st = await self._lp.get_status(dex, alias, idempotency_key=idem_key)
-                        if not st:
-                            raise RuntimeError("status_unavailable_before_swap")
-                        
-                        position_location = st.get("position_location", None)
-                        if position_location == "pool":
-                            # always withdraw mode "pool" to bring capital back idle
-                            res = await self._lp.post_withdraw(dex, alias, mode="pool", idempotency_key=idem_key,)
-                            await self._append_log(
-                                episode_id,
-                                {
-                                    "step": action,
-                                    "attempt": attempt + 1,
-                                    "request": {"dex": dex, "alias": alias, "mode": "pool"},
-                                    "response": res,
-                                },
-                            )
-                            if res is None:
-                                raise RuntimeError("withdraw_failed")
-                            
-                        success = True
-
-                    elif action == "SWAP_EXACT_IN_REWARD":
-                        # after withdraw, capital is idle in vault.
-                        st = await self._lp.get_status(dex, alias, idempotency_key=idem_key)
-                        if not st:
-                            raise RuntimeError("status_unavailable_before_swap")
-                        
-                        gauge_reward_balances = st.get("gauge_reward_balances", {}) or {}
-                        reward_token = gauge_reward_balances.get("token", None)
-                        reward_symbol = gauge_reward_balances.get("symbol", None)
-                        reward_in_vault = gauge_reward_balances.get("in_vault", 0.0)
-                        reward_in_vault_to_swap = reward_in_vault - 0.000001
-                        
-                        token0_addr = episode.get("token0_address")  
-                        token1_addr = episode.get("token1_address")  
-                        
-                        holdings = st.get("holdings", {}) or {}
-                        syms = (holdings.get("symbols") or {})
-                        sym0 = (syms.get("token0") or "").upper()
-                        sym1 = (syms.get("token1") or "").upper()
-                        
-                        token0_is_usd = self._is_usd(sym0)
-                        token1_is_usd = self._is_usd(sym1)
-                        
-                        token_out_addr = None
-                        if token0_is_usd:
-                            token_out_addr = token0_addr
-                        else:
-                            token_out_addr = token1_addr
-                            
-                        if reward_token and reward_symbol and reward_in_vault > 0:
-                            # log snapshot BEFORE swap calc
-                            await self._append_log(
-                                episode_id,
-                                {
-                                    "step": action,
-                                    "phase": "pre_calc",
-                                    "attempt": attempt + 1,
-                                    "reward_token": reward_token,
-                                    "reward_symbol": reward_symbol,
-                                    "reward_in_vault": reward_in_vault,
-                                    "reward_in_vault_to_swap": reward_in_vault_to_swap
-                                },
-                            )
-                            
-                            res = await self._lp.post_swap_exact_in(
-                                dex=dex if dex == "pancake" else "uniswap",
-                                alias=alias,
-                                token_in=reward_token,
-                                token_out=token_out_addr,
-                                amount_in=reward_in_vault_to_swap,
-                                pool_override="CAKE_USDC" if dex == "pancake" else "AERO_USDC",
-                                convert_gauge_to_usdc=True,
-                                idempotency_key=idem_key,
-                            )
-                                
-                            await self._append_log(
-                                episode_id,
-                                {
-                                    "step": action,
-                                    "phase": "swap_call",
-                                    "attempt": attempt + 1,
-                                    "request": {
-                                        "token_in": reward_token,
-                                        "token_out": token_out_addr,
-                                        "amount_in": reward_in_vault_to_swap,
-                                    },
-                                    "response": res,
-                                },
-                            )
-
-                            if res is None:
-                                raise RuntimeError("swap_failed")
-
-                            success = True
-                        else:
-                            await self._append_log(
-                                episode_id,
-                                    {
-                                        "step": action,
-                                        "phase": "skip_small",
-                                        "attempt": attempt + 1,
-                                        "reward_token": reward_token,
-                                        "reward_symbol": reward_symbol,
-                                        "reward_in_vault": reward_in_vault
-                                    },
-                                )
-                            success = True
-                            
-                    elif action == "SWAP_EXACT_IN":
-                        # after withdraw, capital is idle in vault.
-                        st = await self._lp.get_status(dex, alias, idempotency_key=idem_key)
-                        if not st:
-                            raise RuntimeError("status_unavailable_before_swap")
-                        
-                        holdings = st.get("holdings", {}) or {}
-                        totals = holdings.get("totals", {}) or {}
-                        amt0 = float(totals.get("token0", 0.0))
-                        amt1 = float(totals.get("token1", 0.0))
-                        
-                        prices = st.get("prices", {}) or {}
-                        current_prices = prices.get("current", {}) or {}
-                        p_t1_t0 = float(current_prices.get("p_t1_t0", 0.0))
-                    
-                        # log snapshot BEFORE swap calc
-                        await self._append_log(
-                            episode_id,
-                            {
-                                "step": action,
-                                "phase": "pre_calc",
-                                "attempt": attempt + 1,
-                                "holdings_raw": {
-                                    "amt0": amt0,
-                                    "amt1": amt1,
-                                },
-                                "price_snapshot": {
-                                    "p_t1_t0": p_t1_t0,
-                                },
-                            },
-                        )
-
-                        if p_t1_t0 <= 0.0:
-                            # sem preço confiável = não dá pra calcular USD; nesse caso a gente não swapa
-                            await self._append_log(
-                                episode_id,
-                                {
-                                    "step": action,
-                                    "phase": "skip_no_price",
-                                    "attempt": attempt + 1,
-                                    "reason": "p_t1_t0 <= 0",
-                                },
-                            )
-                            success = True
-                        else:
-                            usd0 = amt0 * p_t1_t0  # quanto vale nosso token0 em USDC
-                            usd1 = amt1            # token1 já é USDC
-                            total_usd = usd0 + usd1
-                            P = p_t1_t0
-                            
-                            Pa = step["payload"].get("lower_price")
-                            Pb = step["payload"].get("upper_price")
-                            L_target = self._L_closed(total_usd, P, Pa, Pb)
-                            t0_needed, t1_needed = self._tokens_from_L(L_target, Pa, Pb, P)
-                            
-                            majority_flag = episode.get("majority_on_open")
-                            
-                            falta_t0 = None
-                            falta_t1 = None
-                            t0_needed_usd = None
-                            if majority_flag == "token1":
-                                # queremos alinhar token1 (USDC-like)
-                                falta_t1 = t1_needed - usd1
-                                if falta_t1 > 0:
-                                    token_in_addr = token0_addr  # vender WETH
-                                    token_out_addr = token1_addr # comprar USDC
-                                    req_amount_usd = falta_t1
-                                    direction = "WETH->USDC"
-                                else:
-                                    token_in_addr = token1_addr  # vender USDC
-                                    token_out_addr = token0_addr # comprar WETH
-                                    req_amount_usd = (-falta_t1)
-                                    direction = "USDC->WETH"
-                                    
-                            else:
-                                # majority_flag == "token2" (WETH)
-                                t0_needed_usd = t0_needed * P
-                                falta_t0  = t0_needed_usd - usd0
-                                if falta_t0 > 0:
-                                    token_in_addr = token1_addr  # vender USDC
-                                    token_out_addr = token0_addr # comprar WETH
-                                    req_amount_usd = falta_t0
-                                    direction = "USDC->WETH"
-                                else:
-                                    token_in_addr = token0_addr  # vender WETH
-                                    token_out_addr = token1_addr # comprar USDC
-                                    req_amount_usd = (-falta_t0)
-                                    direction = "WETH->USDC"
-
-                            # para evitar o valor exato e causar erros de saldo
-                            req_amount_usd = req_amount_usd - 0.00001
-                            
-                            # log cálculo alvo
-                            await self._append_log(
-                                episode_id,
-                                {
-                                    "step": action,
-                                    "phase": "calc_swap",
-                                    "attempt": attempt + 1,
-                                    "majority_flag": majority_flag,
-                                    "p_t1_t0": p_t1_t0,
-                                    "usd0": usd0,
-                                    "usd1": usd1,
-                                    "total_usd": total_usd,
-                                    "t0_needed":t0_needed if t0_needed else None,
-                                    "t1_needed": t1_needed if t1_needed else None,
-                                    "falta_t1": falta_t1 if falta_t1 else None,
-                                    "falta_t0": falta_t0 if falta_t0 else None,
-                                    "t0_needed_usd": t0_needed_usd if t0_needed_usd else None,
-                                    "req_amount_usd": req_amount_usd if req_amount_usd else None,
-                                    "direction": direction,
-                                    "request_amount_in_usd": req_amount_usd,
-                                },
-                            )
-
-                            # se req_amount_usd ~ 0, nada a fazer
-                            if req_amount_usd <= 0.0:
-                                await self._append_log(
+                        try:
+                            if episode_id:
+                                await self._episode_repo.update_partial(
                                     episode_id,
                                     {
-                                        "step": action,
-                                        "phase": "skip_small",
-                                        "attempt": attempt + 1,
-                                        "reason": "no meaningful delta",
+                                        "Pa": float(lower_price),
+                                        "Pb": float(upper_price),
+                                        "open_price": float(P_h),
                                     },
                                 )
-                                success = True
-                            else:
-                                res = await self._lp.post_swap_exact_in(
-                                    dex="aerodrome", # todas as pools sao WETH/USDC, entao o swap sempre aerodrome com fee 0.0008
-                                    alias=alias,
-                                    token_in=token_in_addr,
-                                    token_out=token_out_addr,
-                                    amount_in_usd=req_amount_usd if direction == "WETH->USDC" else None,
-                                    amount_in=req_amount_usd if direction == "USDC->WETH" else None,
-                                    pool_override="WETH_USDC" if dex == "pancake" else None,
-                                    idempotency_key=idem_key,
-                                )
-
-                                await self._append_log(
-                                    episode_id,
-                                    {
-                                        "step": action,
-                                        "phase": "swap_call",
-                                        "attempt": attempt + 1,
-                                        "request": {
-                                            "token_in": token_in_addr,
-                                            "token_out": token_out_addr,
-                                            "amount_in_usd": req_amount_usd,
-                                        },
-                                        "response": res,
-                                    },
-                                )
-
-                                if res is None:
-                                    raise RuntimeError("swap_failed")
-
-                                success = True
-                                                 
+                            episode["Pa"] = float(lower_price)
+                            episode["Pb"] = float(upper_price)
+                            episode["open_price"] = float(P_h)
+                        except Exception:
+                            pass
+                        
+                        success = True
+                                             
                     elif action == "OPEN":
                         # Antes de abrir nova faixa, snapshot de idle caps atuais
-                        st2 = await self._lp.get_status(dex, alias)
+                        st2 = await self._lp.get_status(alias)
                         if not st2:
                             raise RuntimeError("status_unavailable_before_open")
 
@@ -893,8 +676,8 @@ class ExecuteSignalPipelineUseCase:
                         cap0 = float(totals2.get("token0", 0.0))
                         cap1 = float(totals2.get("token1", 0.0))
 
-                        lower_price = step["payload"].get("lower_price")
-                        upper_price = step["payload"].get("upper_price")
+                        lower_price, upper_price, rctx = await self._compute_dynamic_range_after_status(st2, episode)
+                        P_h = float(rctx["P_h"])
 
                         await self._append_log(
                             episode_id,
@@ -910,6 +693,7 @@ class ExecuteSignalPipelineUseCase:
                                     "lower_price": lower_price,
                                     "upper_price": upper_price,
                                 },
+                                "range_ctx": {"P_h": P_h, "human_is_t0_t1": rctx.get("human_is_t0_t1")},
                             },
                         )
 
@@ -940,33 +724,25 @@ class ExecuteSignalPipelineUseCase:
 
                         if res is None:
                             raise RuntimeError("open_failed")
+                        
+                        try:
+                            if episode_id:
+                                await self._episode_repo.update_partial(
+                                    episode_id,
+                                    {
+                                        "Pa": float(lower_price),
+                                        "Pb": float(upper_price),
+                                        "open_price": float(P_h),
+                                    },
+                                )
+                            episode["Pa"] = float(lower_price)
+                            episode["Pb"] = float(upper_price)
+                            episode["open_price"] = float(P_h)
+                        except Exception:
+                            pass
+                        
                         success = True
                     
-                    elif action == "STAKE":
-                        # estaca somente se existir gauge e a posição estiver no pool (não-gauge)
-                        st = await self._lp.get_status(dex, alias, idempotency_key=idem_key)
-                        if not st:
-                            raise RuntimeError("status_unavailable_before_stake")
-
-                        if bool(st.get("has_gauge")) and (st.get("position_location") != "gauge"):
-                            # token_id é opcional; o provider pode resolver internamente
-                            token_id = step.get("payload", {}).get("token_id")
-                            res = await self._lp.post_stake(dex, alias, token_id=token_id, idempotency_key=idem_key)
-                            await self._append_log(episode_id, {
-                                "step": action, "phase": "stake_call",
-                                "attempt": attempt + 1, "request": {"token_id": token_id},
-                                "response": res,
-                            })
-                            if res is None:
-                                raise RuntimeError("stake_failed")
-                        else:
-                            await self._append_log(episode_id, {
-                                "step": action, "phase": "skip_no_gauge",
-                                "attempt": attempt + 1,
-                                "reason": "no gauge or already staked",
-                            })
-                        success = True
-
                     else:
                         raise RuntimeError(f"unknown action {action}")
 
@@ -1067,23 +843,6 @@ class ExecuteSignalPipelineUseCase:
         # ==========================
         try:
             if batch_res and last_episode_id and last_episode:
-                after = batch_res.get("after") or {}
-                before = batch_res.get("before") or {}
-                snapshot = after  # estado após unstake/exit/swap/open
-
-                # --------- snapshots de estado ---------
-                totals = snapshot.get("totals") or {}
-                vault_idle = snapshot.get("vault_idle") or {}
-                in_position = snapshot.get("in_position") or {}
-
-                # CAKE: sempre usar BEFORE (como você já fazia)
-                gauge_rewards = before.get("gauge_rewards") or {}
-                # rewards e fees: usar AFTER
-                rewards_collected_cum = snapshot.get("rewards_collected_cum") or {}
-                fees_uncollected = snapshot.get("fees_uncollected") or {}
-                fees_collected_cum = snapshot.get("fees_collected_cum") or {}
-                gauge_reward_balances = snapshot.get("gauge_reward_balances") or {}
-                
                 fees_uncollected_st = {}
                 fees_uncollected_st_usd = 0
                 gauge_rewards_st_usd = 0
@@ -1097,18 +856,27 @@ class ExecuteSignalPipelineUseCase:
                 # -------------------------
                 # 1) Lifetime atual (fechamento da pool anterior) em tokens
                 # -------------------------
-                pending_cake = float(gauge_rewards.get("pending_amount") or 0.0)
-                pending_cake_usd_est = float(gauge_rewards.get("pending_usd_est") or 0.0)
+                pending_cake = 0.0
+                pending_cake_usd_est = 0.0
+                
+                if st:
+                    gauge_rewards = st.get("gauge_rewards") or {}
+                    pending_cake = float(gauge_rewards.get("pending_amount") or 0.0)
+                    pending_cake_usd_est = float(gauge_rewards.get("pending_usd_est") or 0.0)
 
                 # -------------------------
                 # 5) Conversão dos deltas -> USD (incluindo CAKE)
                 # -------------------------
-                prices = (snapshot.get("prices") or {})
-                p_t1_t0 = float(prices.get("p_t1_t0") or 0.0)
-                p_t0_t1 = float(prices.get("p_t0_t1") or (0.0 if p_t1_t0 == 0.0 else 1.0 / p_t1_t0))
+                p_t1_t0=0.0
+                p_t0_t1=0.0
+                if st:
+                    prices = (st.get("prices") or {})
+                    current_prices = (st.get("current") or {})
+                    p_t1_t0 = float(current_prices.get("p_t1_t0") or 0.0)
+                    p_t0_t1 = float(current_prices.get("p_t0_t1") or (0.0 if p_t1_t0 == 0.0 else 1.0 / p_t1_t0))
 
                 # busca status completo para descobrir quais tokens são USD-like
-                st_for_prices = await self._lp.get_status(dex, alias)
+                st_for_prices = await self._lp.get_status(alias)
                 holdings_full = (st_for_prices or {}).get("holdings", {}) or {}
                 syms = (holdings_full.get("symbols") or {})
                 sym0 = (syms.get("token0") or "").upper()
@@ -1139,7 +907,17 @@ class ExecuteSignalPipelineUseCase:
                 # -------------------------
                 # 6) APR (sempre numérico, APR em fração + em %)
                 # -------------------------
-                total_position_usd = float(in_position.get("usd") or 0.0)
+                total_position_usd = 0.0
+                total_vault_idle_usd = 0.0
+                totals_usd = 0.0
+                if st:
+                    holdings = st.get("holdings") or {}
+                    in_position = holdings.get("in_position") or {}
+                    total_position_usd = float(in_position.get("total_usd") or 0.0)
+                    vault_idle = holdings.get("vault_idle") or {}
+                    total_vault_idle_usd = float(vault_idle.get("total_usd") or 0.0)
+                    totals = holdings.get("totals") or {}
+                    totals_usd = float(totals.get("total_usd") or 0.0)
 
                 qty_candles = int(last_episode.get("last_event_bar") or 0)
                 out_above_streak_total = int(last_episode.get("out_above_streak_total") or 0)
@@ -1234,19 +1012,13 @@ class ExecuteSignalPipelineUseCase:
                 metrics = {
                     "episode_meta": episode_meta,
 
-                    "totals": totals,
-                    "vault_idle": vault_idle,
-                    "in_position": in_position,
-                    "gauge_rewards": gauge_rewards,
-                    "rewards_collected_cum": rewards_collected_cum,
-                    "gauge_reward_balances": gauge_reward_balances,
-                    "fees_uncollected": fees_uncollected,
-                    "fees_collected_cum": fees_collected_cum,
-
                     "fees_uncollected_st_usd": fees_uncollected_st_usd,
                     "gauge_rewards_st_usd": gauge_rewards_st_usd,
                     "fees_this_episode_usd": fees_this_episode_usd,
                     "price_cake_usd_ref": price_cake_usd,
+                    "total_position_usd": total_position_usd,
+                    "total_vault_idle_usd": total_vault_idle_usd,
+                    "totals_usd": totals_usd,
                     
                     "qty_candles": qty_candles,
                     "total_candle_out": total_candle_out,
@@ -1257,7 +1029,7 @@ class ExecuteSignalPipelineUseCase:
                     "APR_daily_pct": APR_daily_pct,
                     "APR_annualy_pct": APR_annualy_pct,
                 }
-
+                
                 metrics_safe = sanitize_for_bson(metrics)
                 
                 # persiste métricas no episódio anterior (fechado)

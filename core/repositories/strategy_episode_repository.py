@@ -46,3 +46,19 @@ class StrategyEpisodeRepository(ABC):
         log: Dict[str, Any],
     ) -> None:
         raise NotImplementedError
+
+    @abstractmethod
+    async def list_by_vault(
+        self,
+        *,
+        dex: str,
+        alias: str,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[StrategyEpisodeEntity | None]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def count_by_vault(self, *, dex: str, alias: str, status: Optional[str] = None) -> int:
+        raise NotImplementedError
