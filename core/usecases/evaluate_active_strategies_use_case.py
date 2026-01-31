@@ -274,8 +274,8 @@ class EvaluateActiveStrategiesUseCase:
                 pct_above_base = float(0.001)  # curto acima
             else:
                 majority = "token2"; mode = "trend_up"
-                pct_below_base = float(0.001)  # curto abaixo
-                pct_above_base = float(0.099)   # largo acima
+                pct_below_base = float(0.099)  # curto abaixo
+                pct_above_base = float(0.001)   # largo acima
         elif pool_type in [t["name"] for t in tiers]:
             # tiers usam banda simétrica no runtime, como no backtest simplificado
             if trend == "down":
