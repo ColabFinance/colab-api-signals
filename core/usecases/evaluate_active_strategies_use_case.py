@@ -427,8 +427,8 @@ class EvaluateActiveStrategiesUseCase:
                     minor_pct = pct_below_base * 10
                 
                 band_params = {
-                    "skew_low_pct": float(params.get("skew_low_pct", 0.05)),
-                    "skew_high_pct": float(params.get("skew_high_pct", 0.05)),
+                    "skew_low_pct": pct_below_base,
+                    "skew_high_pct": pct_above_base,
                     "standard_max_major_side_pct": float(params.get("standard_max_major_side_pct", 0.05)),
                     "high_vol_max_major_side_pct": float(params.get("high_vol_max_major_side_pct", 2.0)),
                     "tiers": list(params.get("tiers", [])),
@@ -719,8 +719,8 @@ class EvaluateActiveStrategiesUseCase:
                     minor_pct = pct_below_base*10
                 
                 band_params = {
-                    "skew_low_pct": float(params.get("skew_low_pct", 0.05)),
-                    "skew_high_pct": float(params.get("skew_high_pct", 0.05)),
+                    "skew_low_pct": pct_below_base,
+                    "skew_high_pct": pct_above_base,
                     "standard_max_major_side_pct": float(params.get("standard_max_major_side_pct", 0.05)),
                     "high_vol_max_major_side_pct": float(params.get("high_vol_max_major_side_pct", 2.0)),
                     "tiers": list(params.get("tiers", [])),
