@@ -10,7 +10,6 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from adapters.external.database.signal_repository_mongodb import SignalRepositoryMongoDB
 from adapters.external.database.strategy_episode_repository_mongodb import StrategyEpisodeRepositoryMongoDB
 from adapters.external.database.strategy_repository_mongodb import StrategyRepositoryMongoDB
-from adapters.external.market_data.market_data_http_client import MarketDataHttpClient
 from adapters.external.pipeline.pipeline_http_client import PipelineHttpClient
 from core.services.strategy_reconciler_service import StrategyReconcilerService
 from core.usecases.evaluate_active_strategies_use_case import EvaluateActiveStrategiesUseCase
@@ -82,41 +81,22 @@ class CandleClosedTriggerUseCase:
         indicator_set: Optional[Dict[str, Any]],
         indicator_snapshot: Optional[Dict[str, Any]],
     ) -> None:
-        md_client: Optional[MarketDataHttpClient] = (
-            MarketDataHttpClient(base_url=self._market_data_base_url)
-            if self._market_data_base_url
-            else None
-        )
 
         if indicator_set is None:
-            if not md_client:
-                self._logger.error(
-                    "indicator_set missing and MARKET_DATA_BASE_URL not configured. indicator_set_id=%s ts=%s",
-                    indicator_set_id,
-                    ts,
-                )
-                return
-            indicator_set = await md_client.get_indicator_set(indicator_set_id)
-            if not indicator_set:
-                self._logger.error("indicator_set not found. indicator_set_id=%s", indicator_set_id)
-                return
+            self._logger.error(
+                "indicator_set missing and MARKET_DATA_BASE_URL not configured. indicator_set_id=%s ts=%s",
+                indicator_set_id,
+                ts,
+            )
+            return
 
         if indicator_snapshot is None:
-            if not md_client:
-                self._logger.error(
-                    "indicator_snapshot missing and MARKET_DATA_BASE_URL not configured. indicator_set_id=%s ts=%s",
-                    indicator_set_id,
-                    ts,
-                )
-                return
-            indicator_snapshot = await md_client.get_indicator_snapshot(indicator_set_id, ts)
-            if not indicator_snapshot:
-                self._logger.error(
-                    "indicator_snapshot not found. indicator_set_id=%s ts=%s",
-                    indicator_set_id,
-                    ts,
-                )
-                return
+            self._logger.error(
+                "indicator_snapshot missing and MARKET_DATA_BASE_URL not configured. indicator_set_id=%s ts=%s",
+                indicator_set_id,
+                ts,
+            )
+            return
 
         # Validate snapshot
         try:
