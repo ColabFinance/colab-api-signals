@@ -585,7 +585,7 @@ class EvaluateActiveStrategiesUseCase:
                 # flip de direção dentro de high_vol
                 if not trigger and pool_type_cur == "high_vol":
                     ema_f_s_percentage = ((ema_f/ema_s)-1)*100
-                    if mode_on_open_cur == "trend_down" and ema_f_s_percentage > 0.3:
+                    if mode_on_open_cur == "trend_down" and ema_f_s_percentage > 10.3:
                         trigger = "high_vol"
                     elif mode_on_open_cur == "trend_up" and ema_f_s_percentage < -0.3:
                         trigger = "high_vol"
