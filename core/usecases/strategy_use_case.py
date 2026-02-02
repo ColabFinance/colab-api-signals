@@ -153,3 +153,40 @@ class StrategyParamsUseCase:
 
         return await self.repo.list_by_owner_chain(chain=chain, owner=owner, status=st)
 
+    async def update_vault_link(self, *, chain: str, owner: str, strategy_id: int, dex: str, alias: str) -> StrategyEntity:
+        """
+        Updates ONLY the vault link fields (dex, alias) for an existing strategy doc.
+
+        Identity: (chain, owner, strategy_id)
+
+        This is called by api-lp after creating/registering a vault.
+        """
+        chain_n = _lower(chain)
+        owner_n = _lower(owner)
+        sid = int(strategy_id)
+
+        if not chain_n:
+            raise ValueError("chain is required")
+        if not owner_n:
+            raise ValueError("owner is required")
+        if sid <= 0:
+            raise ValueError("strategy_id must be >= 1")
+
+        dex_n = _lower(dex)
+        alias_n = _norm(alias)
+        if not dex_n:
+            raise ValueError("dex is required")
+        if not alias_n:
+            raise ValueError("alias is required")
+
+        existing = await self.repo.get_by_onchain_identity(chain=chain_n, owner=owner_n, strategy_id=sid)
+        if not existing:
+            raise ValueError("STRATEGY_NOT_FOUND")
+
+        # preserve everything, only set dex/alias
+        data = existing.model_dump()
+        data["dex"] = dex_n
+        data["alias"] = alias_n
+
+        ent = StrategyEntity(**data)
+        return await self.repo.upsert_by_onchain_identity(ent)

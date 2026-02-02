@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from adapters.entry.http.deps import get_db
-from adapters.entry.http.dtos.strategy_dtos import StrategyExistsQuery, StrategyExistsResponse, StrategyListQuery, StrategyParamsUpsertRequest, StrategyParamsOut, StrategyRegisterRequest
+from adapters.entry.http.dtos.strategy_dtos import StrategyExistsQuery, StrategyExistsResponse, StrategyListQuery, StrategyParamsUpsertRequest, StrategyParamsOut, StrategyRegisterRequest, StrategyVaultLinkRequest
 from adapters.entry.http.auth.user_auth import require_user, UserPrincipal
 
 from adapters.external.database.strategy_repository_mongodb import StrategyRepositoryMongoDB
@@ -155,3 +155,33 @@ async def list_strategies(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list strategies: {exc}") from exc
+    
+
+@router.post("/vault-link", response_model=dict)
+async def link_vault_to_strategy(
+    body: StrategyVaultLinkRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    INTERNAL endpoint (no user auth) called by api-lp after vault creation.
+    Updates strategy with vault link fields: dex + alias.
+    """
+    try:
+        uc = get_use_case(db)
+        await uc.ensure_indexes()
+
+        ent = await uc.update_vault_link(
+            chain=body.chain,
+            owner=body.owner,
+            strategy_id=body.strategy_id,
+            dex=body.dex,
+            alias=body.alias,
+        )
+        data = StrategyParamsOut.model_validate(ent.model_dump())
+        return {"ok": True, "message": "ok", "data": data}
+    except ValueError as exc:
+        if str(exc) == "STRATEGY_NOT_FOUND":
+            raise HTTPException(status_code=404, detail="Strategy not found for (chain, owner, strategy_id).") from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to link vault to strategy: {exc}") from exc
