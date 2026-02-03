@@ -239,3 +239,24 @@ class StrategyVaultLinkRequest(BaseModel):
         if not v:
             raise ValueError("alias is required")
         return v
+    
+
+class StrategyStatusSetRequest(BaseModel):
+    chain: ChainKey
+    owner: str
+    strategy_id: int = Field(..., ge=1)
+    status: str = Field(..., examples=["ACTIVE", "INACTIVE"])
+
+    @field_validator("owner")
+    @classmethod
+    def validate_owner(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not Web3.is_address(v):
+            raise ValueError("Invalid owner address")
+        return v.lower()
+
+    @field_validator("status")
+    @classmethod
+    def norm_status(cls, v: str) -> str:
+        vv = (v or "").strip().upper()
+        return "ACTIVE" if vv == "ACTIVE" else "INACTIVE"
