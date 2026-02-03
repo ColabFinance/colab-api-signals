@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from adapters.entry.http.deps import get_db
-from adapters.entry.http.dtos.strategy_dtos import StrategyExistsQuery, StrategyExistsResponse, StrategyListQuery, StrategyParamsUpsertRequest, StrategyParamsOut, StrategyRegisterRequest, StrategyVaultLinkRequest
+from adapters.entry.http.dtos.strategy_dtos import StrategyExistsQuery, StrategyExistsResponse, StrategyListQuery, StrategyParamsUpsertRequest, StrategyParamsOut, StrategyRegisterRequest, StrategyStatusSetRequest, StrategyVaultLinkRequest
 from adapters.entry.http.auth.user_auth import require_user, UserPrincipal
 
 from adapters.external.database.strategy_repository_mongodb import StrategyRepositoryMongoDB
@@ -185,3 +185,34 @@ async def link_vault_to_strategy(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to link vault to strategy: {exc}") from exc
+
+
+@router.post("/status/set", response_model=dict)
+async def set_strategy_status(
+    body: StrategyStatusSetRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    user: UserPrincipal = Depends(require_user),
+):
+    try:
+        if (body.owner or "").strip().lower() != user.wallet_address:
+            raise HTTPException(status_code=403, detail="Not authorized for this owner address.")
+
+        uc = get_use_case(db)
+        await uc.ensure_indexes()
+
+        ent = await uc.set_status(
+            chain=body.chain,
+            owner=body.owner,
+            strategy_id=body.strategy_id,
+            status=body.status,
+        )
+        data = StrategyParamsOut.model_validate(ent.model_dump())
+        return {"ok": True, "message": "ok", "data": data}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        if str(exc) == "STRATEGY_NOT_FOUND":
+            raise HTTPException(status_code=404, detail="Strategy not found for (chain, owner, strategy_id).") from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to set strategy status: {exc}") from exc

@@ -190,3 +190,29 @@ class StrategyParamsUseCase:
 
         ent = StrategyEntity(**data)
         return await self.repo.upsert_by_onchain_identity(ent)
+    
+    async def set_status(self, *, chain: str, owner: str, strategy_id: int, status: str) -> StrategyEntity:
+        chain_n = _lower(chain)
+        owner_n = _lower(owner)
+        sid = int(strategy_id)
+
+        if not chain_n:
+            raise ValueError("chain is required")
+        if not owner_n:
+            raise ValueError("owner is required")
+        if sid <= 0:
+            raise ValueError("strategy_id must be >= 1")
+
+        st = (_norm(status) or "").upper()
+        st = "ACTIVE" if st == "ACTIVE" else "INACTIVE"
+
+        existing = await self.repo.get_by_onchain_identity(chain=chain_n, owner=owner_n, strategy_id=sid)
+        if not existing:
+            raise ValueError("STRATEGY_NOT_FOUND")
+
+        data = existing.model_dump()
+        data["status"] = st
+
+        ent = StrategyEntity(**data)
+        return await self.repo.upsert_by_onchain_identity(ent)
+    
