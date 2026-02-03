@@ -19,6 +19,12 @@ class StrategyRepositoryMongoDB(StrategyRepository):
         # do not overwrite existing fields with None
         return {k: v for k, v in (doc or {}).items() if v is not None}
 
+    def _strip_set_forbidden_fields(self, doc: dict) -> dict:
+        # MongoDB forbids updating _id; created_* should be insert-only
+        for k in ("_id", "created_at", "created_at_iso"):
+            doc.pop(k, None)
+        return doc
+    
     async def ensure_indexes(self) -> None:
         await self._col.create_index([("status", 1), ("symbol", 1)], name="ix_status_symbol")
         await self._col.create_index([("indicator_set_id", 1), ("status", 1)], name="ix_set_status")
@@ -47,6 +53,7 @@ class StrategyRepositoryMongoDB(StrategyRepository):
         key = {"name": strategy.name, "symbol": strategy.symbol}
         
         set_doc = self._clean_set(doc)
+        set_doc = self._strip_set_forbidden_fields(set_doc)
         
         update = {
             "$set": {
@@ -78,6 +85,7 @@ class StrategyRepositoryMongoDB(StrategyRepository):
         key = {"chain": strategy.chain, "owner": strategy.owner, "strategy_id": int(strategy.strategy_id)}
         
         set_doc = self._clean_set(doc)
+        set_doc = self._strip_set_forbidden_fields(set_doc)
         
         update = {
             "$set": {
@@ -100,6 +108,8 @@ class StrategyRepositoryMongoDB(StrategyRepository):
 
     async def get_by_onchain_identity(self, chain: str, owner: str, strategy_id: int) -> Optional[StrategyEntity]:
         doc = await self._col.find_one({"chain": chain, "owner": owner, "strategy_id": int(strategy_id)})
+        if not doc:
+            return None
         return StrategyEntity.from_mongo(doc)
 
     async def get_active_by_indicator_set(self, indicator_set_id: str) -> List[StrategyEntity]:
