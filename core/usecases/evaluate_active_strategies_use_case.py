@@ -397,9 +397,12 @@ class EvaluateActiveStrategiesUseCase:
 
                 if is_low_vol_now:
                     # comportamento original: abre STANDARD pela tendência
-                    initial_pool_type = "standard"
+                    initial_pool_type = "high_vol"
                     trend_for_pick = trend_now
-                    width_override = params.get("standard_max_major_side_pct")
+                    width_override = params.get(
+                        "high_vol_max_major_side_pct",
+                        2,
+                    )
                 else:
                     # fora de low-vol: força abrir HIGH_VOL com viés de queda
                     initial_pool_type = "high_vol"
@@ -678,7 +681,7 @@ class EvaluateActiveStrategiesUseCase:
                     
                     total_width_override = params.get(
                         "high_vol_max_major_side_pct",
-                        params.get("standard_max_major_side_pct", 0.10),
+                        params.get("standard_max_major_side_pct", 2.10),
                     )
                 else:
                     desired_type = next_pool_type
@@ -787,13 +790,17 @@ class EvaluateActiveStrategiesUseCase:
                         float(chosen_tier["max_major_side_pct"])
                     )
                 else:
+                    # new_ep =await  _open_with_width(
+                    #     "standard",
+                    #     float(params.get("standard_max_major_side_pct", 0.05))
+                    # )
                     new_ep =await  _open_with_width(
-                        "standard",
-                        float(params.get("standard_max_major_side_pct", 0.05))
+                        "high_vol",
+                        float(params.get("high_vol_max_major_side_pct", 2.05))
                     )
                     
             elif trigger == "high_vol":
-                new_ep = await _open_with_width("high_vol", float(params.get("high_vol_max_major_side_pct", 0.10)))
+                new_ep = await _open_with_width("high_vol", float(params.get("high_vol_max_major_side_pct", 2.10)))
             elif trigger.startswith("tighten_"):
                 chosen_tier = None
                 for tier in reversed(tiers_cfg):
@@ -820,9 +827,13 @@ class EvaluateActiveStrategiesUseCase:
                         float(chosen_tier["max_major_side_pct"])
                     )
                 else:
-                    new_ep = await _open_with_width(
-                        "standard",
-                        float(params.get("standard_max_major_side_pct", 0.05))
+                    # new_ep = await _open_with_width(
+                    #     "standard",
+                    #     float(params.get("standard_max_major_side_pct", 0.05))
+                    # )
+                    new_ep =await  _open_with_width(
+                        "high_vol",
+                        float(params.get("high_vol_max_major_side_pct", 2.05))
                     )
 
             if not new_ep:
