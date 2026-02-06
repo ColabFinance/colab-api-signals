@@ -339,6 +339,43 @@ class EvaluateActiveStrategiesUseCase:
         # voltou para dentro: zera só o streak, mantém os totais acumulados
         return 0, 0, out_above_streak_total, out_below_streak_total
 
+    @staticmethod
+    def _gate_tier_runtime(
+        tier: Dict,
+        atr_now: Optional[float],
+        trend: str,
+        atr_streaks: Dict[str, int],
+    ) -> bool:
+        """
+        Backtest parity:
+        - Atualiza streak por tier usando threshold normal ou threshold_down (se trend == 'down' e existir)
+        - Retorna True somente quando streak >= bars_required
+        """
+        if atr_now is None:
+            return False
+
+        name = tier["name"]
+        bars_req = int(tier.get("bars_required", 1))
+
+        thr_up = tier.get("atr_pct_threshold")
+        thr_down = tier.get("atr_pct_threshold_down")
+
+        if trend == "down" and thr_down is not None:
+            thr = float(thr_down)
+        elif thr_up is not None:
+            thr = float(thr_up)
+        else:
+            # sem threshold definido => nunca habilita tier
+            atr_streaks[name] = 0
+            return False
+
+        if atr_now <= thr:
+            atr_streaks[name] = int(atr_streaks.get(name, 0)) + 1
+        else:
+            atr_streaks[name] = 0
+
+        return atr_streaks[name] >= bars_req
+    
     # ===== execute =====
     async def execute_for_indicator_snapshot(self, indicator_set: Dict, indicator_snapshot: Dict) -> None:
         symbol = indicator_snapshot["symbol"]
@@ -542,7 +579,7 @@ class EvaluateActiveStrategiesUseCase:
             # 2) primeiro: decide se vale a pena consultar o pool
             in_range_now = self._is_in_range(P_exec, Pa_cur, Pb_cur, eps)
 
-           # 2b) agora sim: atualiza streaks usando P/Pa/Pb "definitivos" (pool quando necessário)
+            # 2b) agora sim: atualiza streaks usando P/Pa/Pb "definitivos" (pool quando necessário)
             out_above_streak, out_below_streak, out_above_streak_total, out_below_streak_total = self._update_breakout_streaks(
                 P_exec, Pa_cur, Pb_cur, eps,
                 out_above_streak, out_below_streak,
@@ -617,28 +654,13 @@ class EvaluateActiveStrategiesUseCase:
                     for tier in reversed(tiers_cfg):
                         name = tier["name"]
                         allowed_from = tier.get("allowed_from", []) or []
+
                         if pool_type_cur == name:
                             break  # já estamos neste estreitamento
                         if pool_type_cur not in allowed_from:
                             continue
-                        
-                        thr_up = tier.get("atr_pct_threshold")
-                        thr_down = tier.get("atr_pct_threshold_down")
-                        
-                        # escolhe threshold conforme tendência (igual backtest)
-                        if trend_now == "down" and thr_down is not None:
-                            thr = float(thr_down)
-                        else:
-                            thr = float(thr_up)
-                            
-                        bars_req = int(tier["bars_required"])
-                        
-                        if atr_pct is not None and atr_pct <= thr:
-                            atr_streaks[name] = int(atr_streaks.get(name, 0)) + 1
-                        else:
-                            atr_streaks[name] = 0
-                        
-                        if atr_streaks[name] >= bars_req:
+
+                        if self._gate_tier_runtime(tier, atr_pct, trend_now, atr_streaks):
                             chosen_tier = tier
                             break
                         
@@ -780,76 +802,60 @@ class EvaluateActiveStrategiesUseCase:
             
             if trigger in ("cross_min", "cross_max"):
                 chosen_tier = None
+
                 for tier in reversed(tiers_cfg):
-                    name = tier["name"]
                     allowed_from = tier.get("allowed_from", []) or []
                     if pool_type_cur not in allowed_from:
                         continue
-                    
-                    thr_up = tier.get("atr_pct_threshold")
-                    thr_down = tier.get("atr_pct_threshold_down")
-                    
-                    if trend_now == "down" and thr_down is not None:
-                        thr = float(thr_down)
-                    else:
-                        thr = float(thr_up)
-                        
-                    bars_req = int(tier["bars_required"])
-                    # usa ATR do snapshot atual para confirmar
-                    if atr_pct is not None and atr_pct <= thr:
+
+                    if self._gate_tier_runtime(tier, atr_pct, trend_now, atr_streaks):
                         chosen_tier = tier
                         break
-                        
+
+                # persistir streak atualizado (paridade)
+                await self._episode_repo.update_partial(current.id, {
+                    "atr_streak": atr_streaks,
+                })
+
                 if chosen_tier:
                     new_ep = await _open_with_width(
                         chosen_tier["name"],
-                        float(chosen_tier["max_major_side_pct"])
+                        float(chosen_tier["max_major_side_pct"]),
                     )
                 else:
-                    # new_ep =await  _open_with_width(
-                    #     "standard",
-                    #     float(params.get("standard_max_major_side_pct", 0.05))
-                    # )
-                    new_ep =await  _open_with_width(
+                    new_ep = await _open_with_width(
                         "high_vol",
-                        float(params.get("high_vol_max_major_side_pct", 2.05))
+                        float(params.get("high_vol_max_major_side_pct", 2.05)),
                     )
                     
             elif trigger == "high_vol":
                 new_ep = await _open_with_width("high_vol", float(params.get("high_vol_max_major_side_pct", 2.10)))
             elif trigger.startswith("tighten_"):
                 chosen_tier = None
+
                 for tier in reversed(tiers_cfg):
-                    name = tier["name"]
                     allowed_from = tier.get("allowed_from", []) or []
                     if pool_type_cur not in allowed_from:
                         continue
-                    
-                    thr_up = tier.get("atr_pct_threshold")
-                    thr_down = tier.get("atr_pct_threshold_down")
-                    
-                    if trend_now == "down" and thr_down is not None:
-                        thr = float(thr_down)
-                    else:
-                        thr = float(thr_up)
-                        
-                    bars_req = int(tier["bars_required"])
-                    if atr_pct is not None and atr_pct <= thr:
+
+                    if self._gate_tier_runtime(tier, atr_pct, trend_now, atr_streaks):
                         chosen_tier = tier
                         break
+
+                # persistir streak atualizado (paridade)
+                await self._episode_repo.update_partial(current.id, {
+                    "atr_streak": atr_streaks,
+                })
+
                 if chosen_tier:
                     new_ep = await _open_with_width(
                         chosen_tier["name"],
-                        float(chosen_tier["max_major_side_pct"])
+                        float(chosen_tier["max_major_side_pct"]),
                     )
                 else:
-                    # new_ep = await _open_with_width(
-                    #     "standard",
-                    #     float(params.get("standard_max_major_side_pct", 0.05))
-                    # )
-                    new_ep =await  _open_with_width(
+                    new_ep = await _open_with_width(
                         "high_vol",
-                        float(params.get("high_vol_max_major_side_pct", 2.05))
+                        float(params.get("high_vol_max_major_side_pct", 2.05)),
                     )
 
             if not new_ep:
