@@ -352,8 +352,10 @@ class EvaluateActiveStrategiesUseCase:
             chain="base", 
             token_address="0x4200000000000000000000000000000000000006"
         )
-        P_exec = price["price_usd"]
+        P_exec = float(price["price_usd"])
 
+        print("P_exec / P_signal", P_exec, P_signal)
+        
         created_at_iso = indicator_snapshot.get("created_at_iso")
         if created_at_iso:
             # trata o 'Z' do final como UTC
