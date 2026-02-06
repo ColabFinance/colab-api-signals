@@ -2,6 +2,7 @@ from datetime import datetime, time, timezone
 import logging
 from typing import Callable, Dict, List, Optional, Tuple
 
+from adapters.external.market_data.market_data_http_client import MarketDataHttpClient
 from adapters.external.pipeline.pipeline_http_client import PipelineHttpClient
 from core.domain.entities.signal_entity import SignalEntity, SignalStep
 from core.domain.entities.strategy_entity import StrategyEntity
@@ -76,7 +77,8 @@ class EvaluateActiveStrategiesUseCase:
         self._lp_client = lp_client
         self._logger = logger or logging.getLogger(self.__class__.__name__)
         self._on_signal_created = on_signal_created
-
+        self.market_data = MarketDataHttpClient.from_settings()
+        
     @staticmethod
     def _trend_at(ema_fast_val: float, ema_slow_val: float) -> str:
         return "up" if ema_fast_val > ema_slow_val else "down"
@@ -340,12 +342,18 @@ class EvaluateActiveStrategiesUseCase:
     # ===== execute =====
     async def execute_for_indicator_snapshot(self, indicator_set: Dict, indicator_snapshot: Dict) -> None:
         symbol = indicator_snapshot["symbol"]
-        P = float(indicator_snapshot["close"])
+        P_signal = float(indicator_snapshot["close"])
         ema_f = float(indicator_snapshot["ema_fast"])
         ema_s = float(indicator_snapshot["ema_slow"])
         atr_pct = float(indicator_snapshot["atr_pct"])
         ts = int(indicator_snapshot["ts"])
         
+        price = await self.market_data.get_token_price_usd(
+            chain="base", 
+            token_address="0x4200000000000000000000000000000000000006"
+        )
+        P_exec = price["price_usd"]
+
         created_at_iso = indicator_snapshot.get("created_at_iso")
         if created_at_iso:
             # trata o 'Z' do final como UTC
@@ -414,7 +422,7 @@ class EvaluateActiveStrategiesUseCase:
                     
                 # abre primeira banda centrada pela tendência
                 Pa, Pb, mode, majority, _, pct_below_base, pct_above_base = await self._pick_band_for_trend_totalwidth(
-                    P, 
+                    P_exec, 
                     trend_for_pick, 
                     params, 
                     atr_pct,
@@ -457,7 +465,8 @@ class EvaluateActiveStrategiesUseCase:
                     target_minor_pct=minor_pct,
                     open_time=ts,
                     open_time_iso=indicator_snapshot.get("created_at_iso"),
-                    open_price=P,
+                    open_price_signal=P_signal,
+                    open_price_exec=P_exec,
                     Pa=Pa,
                     Pb=Pb,
                     band_total_width_pct=band_total_width_pct,
@@ -529,7 +538,7 @@ class EvaluateActiveStrategiesUseCase:
             # trigger_from_periodic_pool_check = False
             
             # 2) primeiro: decide se vale a pena consultar o pool
-            in_range_now = self._is_in_range(P, Pa_cur, Pb_cur, eps)
+            in_range_now = self._is_in_range(P_exec, Pa_cur, Pb_cur, eps)
 
            # 2b) agora sim: atualiza streaks usando P/Pa/Pb "definitivos" (pool quando necessário)
             out_above_streak, out_below_streak, out_above_streak_total, out_below_streak_total = self._update_breakout_streaks(
@@ -652,7 +661,8 @@ class EvaluateActiveStrategiesUseCase:
                     "close_time": ts,
                     "close_time_iso": now_iso,
                     "close_reason": trigger,
-                    "close_price": P,
+                    "close_price_exec": P_exec,
+                    "close_price_signal": P_signal,
                 },
             )
 
@@ -660,7 +670,8 @@ class EvaluateActiveStrategiesUseCase:
             current.close_time = ts
             current.close_time_iso = now_iso
             current.close_reason = trigger
-            current.close_price = P
+            current.close_price_exec = P_exec
+            current.close_price_signal = P_signal
             
             # helper para abrir com "total width"; aplica preserve quando aplicável
             async def _open_with_width(next_pool_type: str, total_width_override: Optional[float]) -> StrategyEpisodeEntity:
@@ -740,7 +751,8 @@ class EvaluateActiveStrategiesUseCase:
                     target_minor_pct=minor_pct,
                     open_time=ts,
                     open_time_iso=indicator_snapshot.get("created_at_iso"),
-                    open_price=P,
+                    open_price_exec=P_exec,
+                    open_price_signal=P_signal,
                     Pa=Pa_new,
                     Pb=Pb_new,
                     band_total_width_pct=total_width_pct,
