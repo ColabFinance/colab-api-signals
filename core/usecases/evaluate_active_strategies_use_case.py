@@ -579,7 +579,9 @@ class EvaluateActiveStrategiesUseCase:
                         chosen_th = float(vol_th_down)
                     elif vol_th is not None:
                         chosen_th = float(vol_th)
-                        
+                    
+                    print("chosen_th",chosen_th,atr_pct,pool_type_cur)
+                    
                     if (
                         atr_pct is not None
                         and chosen_th is not None
