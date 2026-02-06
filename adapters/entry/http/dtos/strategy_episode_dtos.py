@@ -26,7 +26,8 @@ class StrategyEpisodeOut(BaseModel):
 
     open_time: int
     open_time_iso: Optional[str] = None
-    open_price: float
+    open_price_signal: float
+    open_price_exec: float
 
     Pa: float
     Pb: float
@@ -40,7 +41,8 @@ class StrategyEpisodeOut(BaseModel):
     close_time: Optional[int] = None
     close_time_iso: Optional[str] = None
     close_reason: Optional[str] = None
-    close_price: Optional[float] = None
+    close_price_exec: Optional[float] = None
+    close_price_signal: Optional[float] = None
 
     dex: Optional[str] = None
     alias: Optional[str] = None

@@ -15,7 +15,8 @@ class StrategyEpisodeEntity(MongoEntity):
 
     open_time: int
     open_time_iso: Optional[str] = None
-    open_price: float
+    open_price_exec: float
+    open_price_signal: float
 
     Pa: float
     Pb: float
@@ -42,7 +43,8 @@ class StrategyEpisodeEntity(MongoEntity):
     close_time: Optional[int] = None
     close_time_iso: Optional[str] = None
     close_reason: Optional[str] = None
-    close_price: Optional[float] = None
+    close_price_signal: Optional[float] = None
+    close_price_exec: Optional[float] = None
 
     execution_log: Optional[List[Dict[str, Any]]] = None
     metrics: Optional[Dict[str, Any]] = None
