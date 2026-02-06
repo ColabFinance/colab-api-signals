@@ -544,7 +544,7 @@ class EvaluateActiveStrategiesUseCase:
 
            # 2b) agora sim: atualiza streaks usando P/Pa/Pb "definitivos" (pool quando necessário)
             out_above_streak, out_below_streak, out_above_streak_total, out_below_streak_total = self._update_breakout_streaks(
-                P, Pa_cur, Pb_cur, eps,
+                P_exec, Pa_cur, Pb_cur, eps,
                 out_above_streak, out_below_streak,
                 out_above_streak_total, out_below_streak_total,
             )
@@ -718,7 +718,7 @@ class EvaluateActiveStrategiesUseCase:
                 
                 Pa_new, Pb_new, mode_now, majority_now, _, pct_below_base, pct_above_base = \
                     await self._pick_band_for_trend_totalwidth(
-                        P,
+                        P_exec,
                         trend_for_pick,
                         params,
                         atr_pct,
