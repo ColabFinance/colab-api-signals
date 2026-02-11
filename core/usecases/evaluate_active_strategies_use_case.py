@@ -276,8 +276,8 @@ class EvaluateActiveStrategiesUseCase:
                 pct_above_base = float(0.001)  # curto acima
             else:
                 majority = "token2"; mode = "trend_up"
-                pct_below_base = float(0.099)  # curto abaixo
-                pct_above_base = float(0.001)   # largo acima
+                pct_below_base = float(0.001)  # curto abaixo
+                pct_above_base = float(0.099)   # largo acima
         elif pool_type in [t["name"] for t in tiers]:
             # tiers usam banda simétrica no runtime, como no backtest simplificado
             if trend == "down":
@@ -640,7 +640,7 @@ class EvaluateActiveStrategiesUseCase:
                     ema_f_s_percentage = ((ema_f/ema_s)-1)*100
                     if mode_on_open_cur == "trend_down" and ema_f_s_percentage > 10.3:
                         trigger = "high_vol"
-                    elif mode_on_open_cur == "trend_up" and ema_f_s_percentage < -0.3:
+                    elif mode_on_open_cur == "trend_up" and ema_f_s_percentage < -0.1:
                         trigger = "high_vol"
             
                 # 4) tiers — apenas se in-range e sem trigger ainda
