@@ -391,8 +391,6 @@ class EvaluateActiveStrategiesUseCase:
         )
         P_exec = float(price["price_usd"])
 
-        print("P_exec / P_signal", P_exec, P_signal)
-        
         created_at_iso = indicator_snapshot.get("created_at_iso")
         if created_at_iso:
             # trata o 'Z' do final como UTC
@@ -617,19 +615,12 @@ class EvaluateActiveStrategiesUseCase:
                     elif vol_th is not None:
                         chosen_th = float(vol_th)
                     
-                    print("chosen_th",chosen_th,atr_pct,pool_type_cur)
-                    
                     if (
                         atr_pct is not None
                         and chosen_th is not None
                         and atr_pct > chosen_th
                         and (
                             pool_type_cur != "high_vol" 
-                            # or (
-                            #     pool_type_cur == "high_vol" 
-                            #     and current.mode_on_open == "trend_up"
-                            #     and trend_now == "down"
-                            # )
                         )
                         
                     ):
@@ -638,7 +629,7 @@ class EvaluateActiveStrategiesUseCase:
                 # flip de direção dentro de high_vol
                 if not trigger and pool_type_cur == "high_vol":
                     ema_f_s_percentage = ((ema_f/ema_s)-1)*100
-                    if mode_on_open_cur == "trend_down" and ema_f_s_percentage > 1.0:
+                    if mode_on_open_cur == "trend_down" and ema_f_s_percentage > 100000.0:
                         trigger = "high_vol"
                     elif mode_on_open_cur == "trend_up" and ema_f_s_percentage < -0.5:
                         trigger = "high_vol"
