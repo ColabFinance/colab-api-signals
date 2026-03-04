@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from adapters.entry.http.dtos.strategy_dtos import StrategyParamsUpsertRequest, StrategyRegisterRequest
 from core.domain.entities.strategy_entity import StrategyEntity
 from core.repositories.strategy_repository import StrategyRepository
 
@@ -25,16 +26,16 @@ class StrategyParamsUseCase:
     async def get_by_onchain_identity(self, *, chain: str, owner: str, strategy_id: int) -> Optional[StrategyEntity]:
         return await self.repo.get_by_onchain_identity(chain=_lower(chain), owner=_lower(owner), strategy_id=int(strategy_id))
 
-    async def upsert_params(self, *, data: Dict[str, Any]) -> StrategyEntity:
+    async def upsert_params(self, *, data: StrategyParamsUpsertRequest) -> StrategyEntity:
         """
         Upserts a strategy doc using onchain identity:
           (chain, owner, strategy_id)
 
         Keeps old fields and params untouched/compatible.
         """
-        chain = _lower(data.get("chain"))
-        owner = _lower(data.get("owner"))
-        strategy_id = int(data.get("strategy_id") or 0)
+        chain = _lower(data.chain)
+        owner = _lower(data.owner)
+        strategy_id = int(data.strategy_id or 0)
 
         if not chain:
             raise ValueError("chain is required")
@@ -43,11 +44,12 @@ class StrategyParamsUseCase:
         if strategy_id <= 0:
             raise ValueError("strategy_id must be >= 1")
 
-        name = _norm(data.get("name"))
-        symbol = _norm(data.get("symbol")).upper()
-        indicator_set_id = _norm(data.get("indicator_set_id"))
-        status = _norm(data.get("status")) or "ACTIVE"
-        params = data.get("params") or {}
+        name = _norm(data.name)
+        symbol = _norm(data.symbol).upper()
+        indicator_set_id = _norm(data.indicator_set_id)
+        stream_key = _norm(data.stream_key)
+        status = _norm(data.status) or "ACTIVE"
+        params = data.params or {}
 
         if not name:
             raise ValueError("name is required")
@@ -63,29 +65,30 @@ class StrategyParamsUseCase:
             symbol=symbol,
             status=status,
             indicator_set_id=indicator_set_id,
+            stream_key=stream_key,
             params=params,
 
             chain=chain,
             owner=owner,
             strategy_id=strategy_id,
-            adapter=_norm(data.get("adapter")) or None,
-            dex_router=_norm(data.get("dex_router")) or None,
-            token0=_norm(data.get("token0")) or None,
-            token1=_norm(data.get("token1")) or None,
-            tx_hash=_norm(data.get("tx_hash")) or None,
+            adapter=_norm(data.adapter) or None,
+            dex_router=_norm(data.dex_router) or None,
+            token0=_norm(data.token0) or None,
+            token1=_norm(data.token1) or None,
+            tx_hash=_norm(data.tx_hash) or None,
         )
 
         return await self.repo.upsert_by_onchain_identity(ent)
 
-    async def upsert_registry_metadata(self, *, data: Dict[str, Any]) -> StrategyEntity:
+    async def upsert_registry_metadata(self, *, data: StrategyRegisterRequest) -> StrategyEntity:
         """
         Upserts registry metadata AFTER onchain strategy registration.
 
         Identity: (chain, owner, strategy_id)
         """
-        chain = _lower(data.get("chain"))
-        owner = _lower(data.get("owner"))
-        strategy_id = int(data.get("strategy_id") or 0)
+        chain = _lower(data.chain)
+        owner = _lower(data.owner)
+        strategy_id = int(data.strategy_id or 0)
 
         if not chain:
             raise ValueError("chain is required")
@@ -94,10 +97,11 @@ class StrategyParamsUseCase:
         if strategy_id <= 0:
             raise ValueError("strategy_id must be >= 1")
 
-        name = _norm(data.get("name"))
-        symbol = _norm(data.get("symbol")).upper()
-        indicator_set_id = _norm(data.get("indicator_set_id"))
-        status = (_norm(data.get("status")) or "INACTIVE").upper()
+        name = _norm(data.name)
+        symbol = _norm(data.symbol).upper()
+        indicator_set_id = _norm(data.indicator_set_id)
+        stream_key = _norm(data.stream_key)
+        status = (_norm(data.status) or "INACTIVE").upper()
         status = "ACTIVE" if status == "ACTIVE" else "INACTIVE"
 
         if not name:
@@ -111,17 +115,18 @@ class StrategyParamsUseCase:
             name=name,
             symbol=symbol,
             indicator_set_id=indicator_set_id,
+            stream_key=stream_key,
             status=status,
             params={},  # init
 
             chain=chain,
             owner=owner,
             strategy_id=strategy_id,
-            adapter=_norm(data.get("adapter")) or None,
-            dex_router=_norm(data.get("dex_router")) or None,
-            token0=_norm(data.get("token0")) or None,
-            token1=_norm(data.get("token1")) or None,
-            tx_hash=_norm(data.get("tx_hash")) or None,
+            adapter=_norm(data.adapter) or None,
+            dex_router=_norm(data.dex_router) or None,
+            token0=_norm(data.token0) or None,
+            token1=_norm(data.token1) or None,
+            tx_hash=_norm(data.tx_hash) or None,
         )
 
         return await self.repo.upsert_by_onchain_identity(ent)
@@ -173,7 +178,7 @@ class StrategyParamsUseCase:
             raise ValueError("strategy_id must be >= 1")
 
         dex_n = _lower(dex)
-        alias_n = _norm(alias)
+        alias_n = _lower(_norm(alias))
         if not dex_n:
             raise ValueError("dex is required")
         if not alias_n:

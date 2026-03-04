@@ -429,6 +429,7 @@ class EvaluateActiveStrategiesUseCase:
             
             # 1) episódio atual
             strat_id = strat.name
+            strat_stream_key = strat.stream_key
             current = await self._episode_repo.get_open_by_strategy(strat_id)
             if current is None:
                 # decide se estamos em low-vol efetivo agora
@@ -443,7 +444,7 @@ class EvaluateActiveStrategiesUseCase:
                 if is_low_vol_now:
                     # comportamento original: abre STANDARD pela tendência
                     initial_pool_type = "high_vol"
-                    trend_for_pick = trend_now
+                    trend_for_pick = "down"
                     width_override = params.get(
                         "high_vol_max_major_side_pct",
                         2,
@@ -493,6 +494,7 @@ class EvaluateActiveStrategiesUseCase:
                         
                 new_ep = StrategyEpisodeEntity(
                     id=f"ep_{strat_id}_{ts}",
+                    stream_key=strat_stream_key,
                     strategy_id=strat_id,
                     symbol=symbol,
                     pool_type=initial_pool_type,
@@ -625,15 +627,7 @@ class EvaluateActiveStrategiesUseCase:
                         
                     ):
                         trigger = "high_vol"
-                
-                # flip de direção dentro de high_vol
-                if not trigger and pool_type_cur == "high_vol":
-                    ema_f_s_percentage = ((ema_f/ema_s)-1)*100
-                    if mode_on_open_cur == "trend_down" and ema_f_s_percentage > 100000000.0:
-                        trigger = "high_vol"
-                    elif mode_on_open_cur == "trend_up" and ema_f_s_percentage < -0.5:
-                        trigger = "high_vol"
-            
+
                 # 4) tiers — apenas se in-range e sem trigger ainda
                 if (
                     not trigger
@@ -760,6 +754,7 @@ class EvaluateActiveStrategiesUseCase:
                 return StrategyEpisodeEntity(
                     id=f"ep_{strat_id}_{ts}",
                     strategy_id=strat_id,
+                    stream_key=strat_stream_key,
                     symbol=symbol,
                     pool_type=desired_type,
                     mode_on_open=mode_now,
