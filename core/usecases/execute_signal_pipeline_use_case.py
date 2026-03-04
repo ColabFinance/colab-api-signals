@@ -1,9 +1,11 @@
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 from math import sqrt
 from typing import Any, Dict, List, Optional, Tuple
 
+from adapters.external.market_data.market_data_http_client import MarketDataHttpClient
 from adapters.external.notify.telegram_notifier import TelegramNotifier
 from core.common.utils import sanitize_for_bson
 from core.domain.entities.signal_entity import SignalEntity
@@ -45,10 +47,13 @@ class ExecuteSignalPipelineUseCase:
         notifier: Optional[TelegramNotifier] = None,
         idempotency_service: Optional[IdempotencyKeyService] = None,
         max_parallel: int = 4,
+        market_data_client: Optional[MarketDataHttpClient] = None,
     ):
         self._signal_repo = signal_repo
         self._episode_repo = episode_repo
         self._lp = lp_client
+        self._market_data = market_data_client or MarketDataHttpClient.from_settings()
+
         self._logger = logger or logging.getLogger(self.__class__.__name__)
         self._max_retries = max_retries
         self._base_backoff = base_backoff_sec
@@ -60,7 +65,143 @@ class ExecuteSignalPipelineUseCase:
         self._max_parallel = max_parallel
         self._semaphore = asyncio.Semaphore(self._max_parallel)
         self.EPS_POS = 1e-12  # usado para clamps de raiz e separação Pa<P<Pb
-    
+     
+    # -------------------------
+    # Tick APR helpers
+    # -------------------------
+
+    def _parse_ts_ms(self, v: Any) -> Optional[int]:
+        """
+        Accepts:
+          - ISO string (with Z or +00:00)
+          - unix ms int
+          - unix seconds int
+        Returns ms since epoch (UTC).
+        """
+        if v is None:
+            return None
+
+        if isinstance(v, (int, float)):
+            iv = int(v)
+            # seconds range (10 digits) vs ms range (13 digits)
+            if iv < 10_000_000_000:
+                return iv * 1000
+            return iv
+
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            try:
+                s2 = s.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(s2)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return int(dt.timestamp() * 1000)
+            except Exception:
+                return None
+
+        return None
+
+    def _seconds_in_range_from_ticks(
+        self,
+        ticks: List[Tuple[int, float]],
+        Pa: float,
+        Pb: float,
+        invert_price: bool,
+    ) -> float:
+        if not ticks or len(ticks) < 2:
+            return 0.0
+        if Pa > Pb:
+            Pa, Pb = Pb, Pa
+
+        sec_in = 0.0
+        for (ts0, p0), (ts1, p1) in zip(ticks, ticks[1:]):
+            dt = max(0.0, (int(ts1) - int(ts0)) / 1000.0)
+            if dt <= 0.0:
+                continue
+
+            a = float(p0)
+            b = float(p1)
+
+            # bring to "human USD-per-risk" if needed
+            if invert_price:
+                if a > 0:
+                    a = 1.0 / a
+                if b > 0:
+                    b = 1.0 / b
+
+            pm = (a + b) / 2.0
+            if Pa < pm < Pb:
+                sec_in += dt
+
+        return float(sec_in)
+
+    def _apr_annual_pct_from_minutes(self, fees_usd: float, base_usd: float, minutes_in_range: float) -> float:
+        if fees_usd <= 0.0 or base_usd <= 0.0 or minutes_in_range <= 0.0:
+            return 0.0
+        minutes_per_year = 525_600.0
+        return float((fees_usd / base_usd) * (minutes_per_year / minutes_in_range) * 100.0)
+
+    def _apr_annual_pct_from_seconds(self, fees_usd: float, base_usd: float, seconds_in_range: float) -> float:
+        if fees_usd <= 0.0 or base_usd <= 0.0 or seconds_in_range <= 0.0:
+            return 0.0
+        seconds_per_year = 365.0 * 24.0 * 3600.0
+        return float((fees_usd / base_usd) * (seconds_per_year / seconds_in_range) * 100.0)
+
+    async def _fetch_ticks_paginated(
+        self,
+        *,
+        stream_key: str,
+        ts_from: int,
+        ts_to: int,
+        hard_limit: int = 200_000,
+        page_limit: int = 50_000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Paginates via ts_from to avoid missing long episodes.
+        Uses /market-data/price-ticks which returns sorted ticks by ts.
+        """
+        out: List[Dict[str, Any]] = []
+        cursor = int(ts_from)
+        loops = 0
+
+        while cursor <= int(ts_to) and len(out) < int(hard_limit):
+            loops += 1
+            if loops > 25:
+                break
+
+            lim = int(min(page_limit, hard_limit - len(out)))
+            batch = await self._market_data.list_price_ticks(
+                stream_key=stream_key,
+                ts_from=cursor,
+                ts_to=int(ts_to),
+                limit=lim,
+                access_token=None,
+            )
+            if not batch:
+                break
+
+            out.extend(batch)
+
+            last_ts = None
+            try:
+                last_ts = int(batch[-1].get("ts"))
+            except Exception:
+                last_ts = None
+
+            if last_ts is None or last_ts <= cursor:
+                break
+
+            if len(batch) < lim:
+                break
+
+            cursor = last_ts + 1
+
+        # ensure sorted & unique-ish
+        out.sort(key=lambda x: int(x.get("ts") or 0))
+        return out
+   
     def _build_idempotency_key(self, signal: SignalEntity, action: str) -> str:
         return self._idempotency.build_for_signal_step(signal, action)
     
@@ -843,38 +984,29 @@ class ExecuteSignalPipelineUseCase:
         try:
             if batch_res and last_episode_id and last_episode:
                 fees_uncollected_st = {}
-                fees_uncollected_st_usd = 0
-                gauge_rewards_st_usd = 0
+                fees_uncollected_st_usd = 0.0
+                gauge_rewards_st_usd = 0.0
                 if st:
                     fees_uncollected_st = st.get("fees_uncollected") or {}
-                    fees_uncollected_st_usd = fees_uncollected_st.get("usd", 0)
+                    fees_uncollected_st_usd = float(fees_uncollected_st.get("usd", 0.0) or 0.0)
                     gauge_rewards_st = st.get("gauge_rewards") or {}
-                    gauge_rewards_st_usd = gauge_rewards_st.get("pending_usd_est", 0)
-                
-                
-                # -------------------------
-                # 1) Lifetime atual (fechamento da pool anterior) em tokens
-                # -------------------------
+                    gauge_rewards_st_usd = float(gauge_rewards_st.get("pending_usd_est", 0.0) or 0.0)
+
                 pending_cake = 0.0
                 pending_cake_usd_est = 0.0
-                
                 if st:
                     gauge_rewards = st.get("gauge_rewards") or {}
                     pending_cake = float(gauge_rewards.get("pending_amount") or 0.0)
                     pending_cake_usd_est = float(gauge_rewards.get("pending_usd_est") or 0.0)
 
-                # -------------------------
-                # 5) Conversão dos deltas -> USD (incluindo CAKE)
-                # -------------------------
-                p_t1_t0=0.0
-                p_t0_t1=0.0
+                p_t1_t0 = 0.0
+                p_t0_t1 = 0.0
                 if st:
                     prices = (st.get("prices") or {})
-                    current_prices = (st.get("current") or {})
+                    current_prices = (prices.get("current") or {})
                     p_t1_t0 = float(current_prices.get("p_t1_t0") or 0.0)
                     p_t0_t1 = float(current_prices.get("p_t0_t1") or (0.0 if p_t1_t0 == 0.0 else 1.0 / p_t1_t0))
 
-                # busca status completo para descobrir quais tokens são USD-like
                 st_for_prices = await self._lp.get_status(alias)
                 holdings_full = (st_for_prices or {}).get("holdings", {}) or {}
                 syms = (holdings_full.get("symbols") or {})
@@ -884,27 +1016,22 @@ class ExecuteSignalPipelineUseCase:
                 token0_is_usd = self._is_usd(sym0)
                 token1_is_usd = self._is_usd(sym1)
 
-                # Conversão token0/token1 -> USD
                 if token1_is_usd:
-                    # token1 é USD-like → p_t1_t0 = USD por token0
                     usd_per_t0 = p_t1_t0
                     usd_per_t1 = 1.0
                 elif token0_is_usd:
-                    # token0 é USD-like → p_t0_t1 = USD por token1
                     usd_per_t0 = 1.0
                     usd_per_t1 = p_t0_t1
                 else:
-                    # nenhum é USD: trata token1 como quote
                     usd_per_t0 = p_t1_t0
                     usd_per_t1 = 1.0
 
-                # CAKE -> USD: usa pending_usd_est / pending_amount como preço de referência (BEFORE)
                 price_cake_usd = 0.0
                 if pending_cake > 0.0 and pending_cake_usd_est > 0.0:
                     price_cake_usd = pending_cake_usd_est / pending_cake
 
                 # -------------------------
-                # 6) APR (sempre numérico, APR em fração + em %)
+                # 6) APR (minuto = atual; segundo = ticks)
                 # -------------------------
                 total_position_usd = 0.0
                 total_vault_idle_usd = 0.0
@@ -931,20 +1058,26 @@ class ExecuteSignalPipelineUseCase:
                 APR_annualy = 0.0
                 percentage_fee_vs_position = 0.0
 
-                fees_this_episode_usd=fees_uncollected_st_usd+gauge_rewards_st_usd
+                fees_this_episode_usd = float(fees_uncollected_st_usd + gauge_rewards_st_usd)
+
+                # ---- APR atual (por minuto) usando candles ----
                 if total_position_usd > 0.0 and fees_this_episode_usd > 0.0:
-                    
                     percentage_fee_vs_position = fees_this_episode_usd / total_position_usd
                     APR_daily = (1440.0 / qty_candles_in_formula) * percentage_fee_vs_position
                     APR_annualy = APR_daily * 365.0
-                    
+
                 APR_daily_pct = APR_daily * 100.0
                 APR_annualy_pct = APR_annualy * 100.0
-                
-                
-                # -------------------------
-                # 7) Metadados de episódio (anterior x atual)
-                # -------------------------
+
+                # ---- APR por segundo (ticks) + APR por minuto (ticks) ----
+                apr_ticks_annual_by_min_pct = 0.0
+                apr_ticks_annual_by_sec_pct = 0.0
+                ticks_seconds_in_range = 0.0
+                ticks_minutes_in_range = 0.0
+                ticks_count = 0
+                tick_calc_used = False
+                tick_calc_reason = None
+
                 prev_open_ts = (
                     last_episode.get("open_time_iso")
                     or last_episode.get("created_at_iso")
@@ -954,19 +1087,94 @@ class ExecuteSignalPipelineUseCase:
                     or last_episode.get("close_time")
                 )
 
+                prev_lower = last_episode.get("Pa")
+                prev_upper = last_episode.get("Pb")
+
+                ts_from_ms = self._parse_ts_ms(prev_open_ts)
+                ts_to_ms = self._parse_ts_ms(prev_close_ts)
+
+                stream_key = (
+                    last_episode.get("stream_key")
+                    or episode.get("stream_key")
+                )
+
+                # ticks.price costuma ser p_t1_t0 (token1 per token0).
+                # Quando token0 é USD e token1 é risco, a escala humana do range é USD por token1 (= p_t0_t1),
+                # então invertemos o tick para comparar.
+                invert_tick_price = bool(token0_is_usd and (not token1_is_usd))
+
+                if (
+                    stream_key
+                    and ts_from_ms is not None
+                    and ts_to_ms is not None
+                    and ts_to_ms > ts_from_ms
+                    and prev_lower is not None
+                    and prev_upper is not None
+                    and fees_this_episode_usd > 0.0
+                    and total_position_usd > 0.0
+                ):
+                    try:
+                        Pa_h = float(prev_lower)
+                        Pb_h = float(prev_upper)
+
+                        raw = await self._fetch_ticks_paginated(
+                            stream_key=str(stream_key),
+                            ts_from=int(ts_from_ms),
+                            ts_to=int(ts_to_ms),
+                            hard_limit=200_000,
+                            page_limit=50_000,
+                        )
+
+                        ticks_count = int(len(raw))
+                        ticks_pairs: List[Tuple[int, float]] = []
+                        for r in raw:
+                            try:
+                                ts_i = int(r.get("ts"))
+                                p_i = float(r.get("price"))
+                                ticks_pairs.append((ts_i, p_i))
+                            except Exception:
+                                continue
+
+                        ticks_pairs.sort(key=lambda x: x[0])
+
+                        ticks_seconds_in_range = self._seconds_in_range_from_ticks(
+                            ticks=ticks_pairs,
+                            Pa=Pa_h,
+                            Pb=Pb_h,
+                            invert_price=invert_tick_price,
+                        )
+                        ticks_minutes_in_range = float(ticks_seconds_in_range / 60.0)
+
+                        apr_ticks_annual_by_min_pct = self._apr_annual_pct_from_minutes(
+                            fees_usd=fees_this_episode_usd,
+                            base_usd=total_position_usd,
+                            minutes_in_range=ticks_minutes_in_range,
+                        )
+                        apr_ticks_annual_by_sec_pct = self._apr_annual_pct_from_seconds(
+                            fees_usd=fees_this_episode_usd,
+                            base_usd=total_position_usd,
+                            seconds_in_range=ticks_seconds_in_range,
+                        )
+
+                        tick_calc_used = True
+                    except Exception as exc:
+                        tick_calc_used = False
+                        tick_calc_reason = str(exc)
+                else:
+                    tick_calc_used = False
+                    tick_calc_reason = "missing_inputs"
+
+                # -------------------------
+                # 7) Metadados de episódio
+                # -------------------------
                 cur_open_ts = (
                     episode.get("open_time_iso")
                     or episode.get("created_at_iso")
                 )
 
-                # ranges anteriores e atuais (Pa/Pb são o range real do episódio)
-                prev_lower = last_episode.get("Pa")
-                prev_upper = last_episode.get("Pb")
-
                 cur_lower = episode.get("Pa") or episode.get("lower_price") or episode.get("range_lower")
                 cur_upper = episode.get("Pb") or episode.get("upper_price") or episode.get("range_upper")
 
-                # labels reais do teu modelo (standard/high_vol/tier, up/down, majority)
                 prev_labels = {
                     "pool_type": last_episode.get("pool_type"),
                     "mode_on_open": last_episode.get("mode_on_open"),
@@ -993,18 +1201,12 @@ class ExecuteSignalPipelineUseCase:
                     "prev_open_ts": prev_open_ts,
                     "prev_close_ts": prev_close_ts,
                     "cur_open_ts": cur_open_ts,
-                    "prev_range": {
-                        "Pa": prev_lower,
-                        "Pb": prev_upper,
-                    },
-                    "cur_range": {
-                        "Pa": cur_lower,
-                        "Pb": cur_upper,
-                    },
+                    "prev_range": {"Pa": prev_lower, "Pb": prev_upper},
+                    "cur_range": {"Pa": cur_lower, "Pb": cur_upper},
                     "prev_labels": prev_labels,
                     "cur_labels": cur_labels,
                 }
-       
+
                 # -------------------------
                 # 8) Monta métricas completas
                 # -------------------------
@@ -1018,7 +1220,8 @@ class ExecuteSignalPipelineUseCase:
                     "total_position_usd": total_position_usd,
                     "total_vault_idle_usd": total_vault_idle_usd,
                     "totals_usd": totals_usd,
-                    
+
+                    # APR antigo (por minuto / candles)
                     "qty_candles": qty_candles,
                     "total_candle_out": total_candle_out,
                     "qty_candles_in_formula": qty_candles_in_formula,
@@ -1027,11 +1230,23 @@ class ExecuteSignalPipelineUseCase:
                     "APR_annualy": APR_annualy,
                     "APR_daily_pct": APR_daily_pct,
                     "APR_annualy_pct": APR_annualy_pct,
+
+                    # APR ticks (por minuto e por segundo)
+                    "tick_apr_used": bool(tick_calc_used),
+                    "tick_apr_reason": tick_calc_reason,
+                    "tick_stream_key": stream_key,
+                    "tick_ts_from_ms": ts_from_ms,
+                    "tick_ts_to_ms": ts_to_ms,
+                    "tick_count": ticks_count,
+                    "tick_seconds_in_range": float(ticks_seconds_in_range),
+                    "tick_minutes_in_range": float(ticks_minutes_in_range),
+
+                    "APR_annualy_ticks_by_min_pct": float(apr_ticks_annual_by_min_pct),
+                    "APR_annualy_ticks_by_sec_pct": float(apr_ticks_annual_by_sec_pct),
                 }
-                
+
                 metrics_safe = sanitize_for_bson(metrics)
-                
-                # persiste métricas no episódio anterior (fechado)
+
                 await self._episode_repo.update_partial(
                     last_episode_id,
                     {
@@ -1045,7 +1260,6 @@ class ExecuteSignalPipelineUseCase:
                 if getattr(self, "_notifier", None) is not None:
                     lines: List[str] = []
 
-                    # HEADER
                     lines.append("")
                     lines.append("")
                     lines.append("**LP episode fechado e nova posição aberta**")
@@ -1054,9 +1268,6 @@ class ExecuteSignalPipelineUseCase:
                     lines.append(f"Open Episódio atual: {cur_labels.get('open_price_exec')}")
                     lines.append("")
 
-                    # =========================
-                    # EPISÓDIO ANTERIOR
-                    # =========================
                     lines.append("**📌 Episódio anterior (pool fechada)**")
                     lines.append(f"Abertura: {prev_open_ts}")
                     lines.append(f"Fechamento: {prev_close_ts}")
@@ -1066,9 +1277,6 @@ class ExecuteSignalPipelineUseCase:
                     lines.append(f"• Direção (tendência): {prev_labels.get('mode_on_open')}")
                     lines.append("")
 
-                    # =========================
-                    # NOVO EPISÓDIO
-                    # =========================
                     lines.append("**📌 Novo episódio (pool aberta)**")
                     lines.append(f"Abertura: {cur_open_ts}")
                     lines.append(f"Range preços: Pa={cur_lower}, Pb={cur_upper}")
@@ -1077,20 +1285,27 @@ class ExecuteSignalPipelineUseCase:
                     lines.append(f"• Direção (tendência): {cur_labels.get('mode_on_open')}")
                     lines.append("")
 
-                    # =========================
-                    # MÉTRICAS DA POOL ANTERIOR
-                    # =========================
                     lines.append("**📈 Métricas – Episódio encerrado**")
                     lines.append(f"• Fees LP uncollected: {fees_uncollected_st_usd:.8f}")
                     lines.append(f"• Rewards em USDC: {gauge_rewards_st_usd:.8f}")
                     lines.append(f"• Total fees do episódio (USD): {fees_this_episode_usd:.6f}")
-                    lines.append(f"• APR diário aproximado: {APR_daily_pct:.4f}%")
-                    lines.append(f"• APR anualizado aproximado: {APR_annualy_pct:.4f}%")
+
+                    # APR minuto/candles
+                    lines.append(f"• APR diário aproximado (candles): {APR_daily_pct:.4f}%")
+                    lines.append(f"• APR anualizado aproximado (candles): {APR_annualy_pct:.4f}%")
                     lines.append("")
 
-                    # =========================
-                    # PAINEL APR / CANDLES
-                    # =========================
+                    # APR ticks
+                    lines.append("**⏱️ APR por tempo em-range (ticks 5s)**")
+                    if tick_calc_used:
+                        lines.append(f"• Tempo in-range (seg): {ticks_seconds_in_range:.2f}")
+                        lines.append(f"• Tempo in-range (min): {ticks_minutes_in_range:.4f}")
+                        lines.append(f"• APR anualizado (ticks / minuto): {apr_ticks_annual_by_min_pct:.4f}%")
+                        lines.append(f"• APR anualizado (ticks / segundo): {apr_ticks_annual_by_sec_pct:.4f}%")
+                    else:
+                        lines.append(f"• Tick APR indisponível: {tick_calc_reason}")
+                    lines.append("")
+
                     lines.append("**🧮 Painel APR (inputs)**")
                     lines.append(f"• Posição USD no fechamento: {total_position_usd:.6f}")
                     lines.append(f"• Nº total de candles: {qty_candles}")
@@ -1099,13 +1314,10 @@ class ExecuteSignalPipelineUseCase:
                     lines.append(f"• Percentual fees/posição: {(percentage_fee_vs_position * 100):.4f}%")
                     lines.append("")
 
-                    # envia
                     text = "\n".join(lines)
                     await self._notifier.send_message(text)
 
-
         except Exception as exc:
-            # nunca quebrar o fluxo por causa de métrica/telegram
             self._logger.warning("Falha ao calcular métricas ou enviar Telegram: %s", exc)
 
         return True

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from config.settings import settings
 
@@ -43,3 +43,44 @@ class MarketDataHttpClient:
             if res.status_code >= 400:
                 raise RuntimeError(data.get("detail") or data.get("message") or f"market_data_error_{res.status_code}")
             return data
+
+    async def list_price_ticks(
+        self,
+        *,
+        stream_key: str,
+        ts_from: int,
+        ts_to: int,
+        limit: int = 5000,
+        access_token: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Calls api-market-data:
+          GET /market-data/price-ticks?stream_key=...&ts_from=...&ts_to=...&limit=...
+
+        Returns:
+          List of PriceTickOutDTO-like objects:
+          [{"stream_key":..., "ts":..., "price":..., ...}, ...]
+        """
+        url = f"{self.base_url}/api/market-data/price-ticks"
+        params = {
+            "stream_key": stream_key,
+            "ts_from": int(ts_from),
+            "ts_to": int(ts_to),
+            "limit": int(limit),
+        }
+
+        headers = {}
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+
+        async with httpx.AsyncClient(timeout=30.0) as cli:
+            res = await cli.get(url, params=params, headers=headers)
+            data = res.json() if res.content else []
+            if res.status_code >= 400:
+                # server might return {"detail": "..."} or list; handle both
+                if isinstance(data, dict):
+                    raise RuntimeError(data.get("detail") or data.get("message") or f"market_data_error_{res.status_code}")
+                raise RuntimeError(f"market_data_error_{res.status_code}")
+            if isinstance(data, list):
+                return data
+            return []
