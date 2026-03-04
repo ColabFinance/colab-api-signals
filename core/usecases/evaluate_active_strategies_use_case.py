@@ -5,7 +5,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from adapters.external.market_data.market_data_http_client import MarketDataHttpClient
 from adapters.external.pipeline.pipeline_http_client import PipelineHttpClient
 from core.domain.entities.signal_entity import SignalEntity, SignalStep
-from core.domain.entities.strategy_entity import StrategyEntity
+from core.domain.entities.strategy_entity import RangeTierParams, StrategyEntity, StrategyParams
 from core.domain.entities.strategy_episode_entity import StrategyEpisodeEntity
 from core.domain.enums.signal_enums import SignalStatus, SignalType
 
@@ -14,43 +14,6 @@ from ..services.strategy_reconciler_service import StrategyReconcilerService
 from ..repositories.strategy_repository import StrategyRepository
 from ..repositories.strategy_episode_repository import StrategyEpisodeRepository
 from ..repositories.signal_repository import SignalRepository
-
-# LOW-VOL WINDOWS (hardcoded por enquanto; futuramente virá de Strategy.params["low_vol_keys"])
-LOW_VOL_KEYS_DEFAULT = {
-    (2, time(11, 0)),
-    (5, time(2, 0)),
-    (5, time(3, 0)),
-    (5, time(4, 0)),
-    (5, time(5, 0)),
-    (5, time(6, 0)),
-    (5, time(7, 0)),
-    (5, time(8, 0)),
-    (5, time(9, 0)),
-    (5, time(10, 0)),
-    (5, time(11, 0)),
-    (5, time(12, 0)),
-    (5, time(18, 0)),
-    (5, time(19, 0)),
-    (5, time(20, 0)),
-    (5, time(21, 0)),
-    (5, time(22, 0)),
-    (5, time(23, 0)),
-    (6, time(0, 0)),
-    (6, time(1, 0)),
-    (6, time(2, 0)),
-    (6, time(3, 0)),
-    (6, time(4, 0)),
-    (6, time(5, 0)),
-    (6, time(6, 0)),
-    (6, time(7, 0)),
-    (6, time(8, 0)),
-    (6, time(9, 0)),
-    (6, time(10, 0)),
-    (6, time(11, 0)),
-    (6, time(12, 0)),
-    (6, time(20, 0)),
-    (6, time(21, 0)),
-}
 
 
 class EvaluateActiveStrategiesUseCase:
@@ -78,100 +41,15 @@ class EvaluateActiveStrategiesUseCase:
         self._logger = logger or logging.getLogger(self.__class__.__name__)
         self._on_signal_created = on_signal_created
         self.market_data = MarketDataHttpClient.from_settings()
-        
+    
+    # ==========================
+    # Trend / Band helpers
+    # ==========================
+    
     @staticmethod
     def _trend_at(ema_fast_val: float, ema_slow_val: float) -> str:
         return "up" if ema_fast_val > ema_slow_val else "down"
 
-    @staticmethod
-    def _gate_high_vol(atr_pct: Optional[float], threshold: Optional[float]) -> bool:
-        return (atr_pct is not None) and (threshold is not None) and (atr_pct > threshold)
-
-    @staticmethod
-    def _get_low_vol_keys(params: Dict, gating_enabled: bool) -> Optional[set]:
-        """
-        Retorna o set de (dow, time) considerado janela low-vol.
-
-        Por enquanto:
-        - se não houver gating habilitado -> None (sem efeito).
-        - se houver 'low_vol_keys' em params, tentar parsear (futuro).
-        - senão usa LOW_VOL_KEYS_DEFAULT (hardcoded).
-        """
-        if not gating_enabled:
-            return None
-
-        keys_param = params.get("low_vol_keys")
-        if keys_param:
-            parsed = set()
-            try:
-                # Espera algo como [[dow, "HH:MM"], ...] ou [[dow, hour, minute], ...]
-                for item in keys_param:
-                    if isinstance(item, (list, tuple)):
-                        if len(item) == 2:
-                            dow, t = item
-                            if isinstance(t, str):
-                                hh, mm = map(int, t.split(":")[:2])
-                                parsed.add((int(dow), time(hh, mm)))
-                        elif len(item) == 3:
-                            dow, hh, mm = item
-                            parsed.add((int(dow), time(int(hh), int(mm))))
-                if parsed:
-                    return parsed
-            except Exception:
-                # se der erro, cai no default
-                pass
-
-        return LOW_VOL_KEYS_DEFAULT
-
-    @staticmethod
-    def _is_in_low_vol_window(
-        dt_now: datetime,
-        low_vol_keys: Optional[set],
-    ) -> bool:
-        """
-        True se (dia da semana, hora arredondada p/ hora cheia) estiver na low_vol_keys.
-        """
-        if not low_vol_keys:
-            return False
-        bucket_time = dt_now.replace(minute=0, second=0, microsecond=0)
-        key = (bucket_time.weekday(), bucket_time.time())
-        return key in low_vol_keys
-
-    @staticmethod
-    def _is_effectively_low_vol(
-        dt_now: datetime,
-        atr_pct: Optional[float],
-        params: Dict,
-        low_vol_keys: Optional[set],
-        gating_enabled: bool,
-    ) -> bool:
-        """
-        Considera low-vol se:
-          - gating_enabled == True E
-          - (estiver em uma janela estável (low_vol_keys) OU
-             (low_vol_threshold definido E atr_pct < 0.0007))
-
-        Se gating_enabled == False, sempre retorna True (comportamento antigo).
-        """
-        if not gating_enabled:
-            return True
-
-        in_bucket = False
-        if low_vol_keys:
-            in_bucket = EvaluateActiveStrategiesUseCase._is_in_low_vol_window(
-                dt_now, low_vol_keys
-            )
-
-        low_vol_threshold_flag = params.get("low_vol_threshold")
-        by_atr = (
-            low_vol_threshold_flag is not None
-            and atr_pct is not None
-            and atr_pct < low_vol_threshold_flag
-        )
-
-        return in_bucket or by_atr
-    
-    # === Helpers de banda (clamps e largura total) ===
     @staticmethod
     def _ensure_valid_band(Pa: float, Pb: float, P: float) -> Tuple[float, float]:
         EPS_POS = 1e-12
@@ -256,151 +134,143 @@ class EvaluateActiveStrategiesUseCase:
 
     async def _pick_band_for_trend_totalwidth(
         self,
+        *,
         P: float,
         trend: str,
-        params: Dict,
-        atr_pct_now: Optional[float],
-        total_width_override: Optional[float] = None,
-        pool_type: Optional[str] = None,
-    ) -> Tuple[float, float, str, str, bool, float, float]:
+        params: StrategyParams,
+        total_width_override: Optional[float],
+        pool_type: str,
+    ) -> Tuple[float, float, str, str, float, float]:
         """
-        Gera (Pa,Pb) assumindo que 'max_major_side_pct' e afins são LARGURA TOTAL do range.
+        Backtest parity for band construction.
+        Returns: (Pa, Pb, mode, majority, pct_below_base, pct_above_base)
         """
-        tiers: List[Dict] = list(params.get("tiers", []))
-        
-        # skew base
+
         if pool_type == "high_vol":
             if trend == "down":
-                majority = "token1"; mode = "trend_down"
-                pct_below_base = float(0.099)   # largo abaixo
-                pct_above_base = float(0.001)  # curto acima
+                majority = "token1"
+                mode = "trend_down"
+                pct_below_base = float(params.high_vol_base_below_pct)
+                pct_above_base = float(params.high_vol_base_above_pct)
             else:
-                majority = "token2"; mode = "trend_up"
-                pct_below_base = float(0.099)  # curto abaixo
-                pct_above_base = float(0.001)   # largo acima
-        elif pool_type in [t["name"] for t in tiers]:
-            # tiers usam banda simétrica no runtime, como no backtest simplificado
-            if trend == "down":
-                majority = "token1"; mode = "trend_down"
-            else:
-                majority = "token2"; mode = "trend_up"
-            pct_below_base = 0.05
-            pct_above_base = 0.05
+                majority = "token2"
+                mode = "trend_up"
+                if bool(params.high_vol_invert_on_trend_up):
+                    pct_below_base = float(params.high_vol_base_above_pct)
+                    pct_above_base = float(params.high_vol_base_below_pct)
+                else:
+                    pct_below_base = float(params.high_vol_base_below_pct)
+                    pct_above_base = float(params.high_vol_base_above_pct)
         else:
+            # tiers (and any non-high_vol) uses skew_low/high as in backtest
             if trend == "down":
-                majority = "token1"; mode = "trend_down"
-                pct_below_base = float(params.get("skew_low_pct", 0.075))   # largo abaixo
-                pct_above_base = float(params.get("skew_high_pct", 0.025))  # curto acima
+                majority = "token1"
+                mode = "trend_down"
+                pct_below_base = float(params.skew_high_pct)
+                pct_above_base = float(params.skew_low_pct)
             else:
-                majority = "token2"; mode = "trend_up"
-                pct_below_base = float(params.get("skew_high_pct", 0.025))  # curto abaixo
-                pct_above_base = float(params.get("skew_low_pct", 0.075))   # largo acima
-                
-        # regime de vol (flag informativa, com threshold separado p/ tendência de baixa)
-        vol_th = params.get("vol_high_threshold_pct")
-        vol_th_down = params.get("vol_high_threshold_pct_down")
+                majority = "token2"
+                mode = "trend_up"
+                pct_below_base = float(params.skew_low_pct)
+                pct_above_base = float(params.skew_high_pct)
 
-        if trend == "down" and vol_th_down is not None:
-            high_vol = (atr_pct_now is not None) and (atr_pct_now > float(vol_th_down))
-        else:
-            high_vol = (atr_pct_now is not None) and (vol_th is not None) and (atr_pct_now > float(vol_th))
-
-        # total width
         if total_width_override is not None:
             total_width_pct = float(total_width_override)
-        elif pool_type == "high_vol":
-            total_width_pct = float(params.get("high_vol_max_major_side_pct", 2.0))
-        elif pool_type == "standard" or pool_type is None:
-            total_width_pct = float(params.get("standard_max_major_side_pct", 0.05))
-        elif params.get("max_major_side_pct") is not None:
-            total_width_pct = float(params["max_major_side_pct"])
         else:
-            total_width_pct = pct_below_base + pct_above_base
+            total_width_pct = float(params.high_vol_max_major_side_pct) if pool_type == "high_vol" else float(pct_below_base + pct_above_base)
 
         total_width_pct = max(float(total_width_pct), 2e-6)
         pct_below, pct_above = self._scale_to_total_width(pct_below_base, pct_above_base, total_width_pct)
 
-        Pa = P * (1.0 - pct_below)
-        Pb = P * (1.0 + pct_above)
-        Pa, Pb = self._ensure_valid_band(Pa, Pb, P)
-        return Pa, Pb, mode, majority, high_vol, pct_below_base, pct_above_base
+        Pa = float(P) * (1.0 - float(pct_below))
+        Pb = float(P) * (1.0 + float(pct_above))
+        Pa, Pb = self._ensure_valid_band(Pa, Pb, float(P))
+        return Pa, Pb, mode, majority, pct_below_base, pct_above_base
 
-    # === Breakout com confirmação por streak no episódio ===
+    # ==========================
+    # Gates
+    # ==========================
+    
     @staticmethod
-    def _update_breakout_streaks(P: float, Pa: float, Pb: float, eps: float,
-                                 out_above_streak: int, out_below_streak: int,
-                                 out_above_streak_total: int, out_below_streak_total: int) -> Tuple[int, int, int, int]:
-        above = P > Pb * (1.0 + eps)
-        below = P < Pa * (1.0 - eps)
+    def _update_breakout_streaks(
+        P: float,
+        Pa: float,
+        Pb: float,
+        eps: float,
+        out_above_streak: int,
+        out_below_streak: int,
+        out_above_streak_total: int,
+        out_below_streak_total: int,
+    ) -> Tuple[int, int, int, int]:
+        above = float(P) > float(Pb) * (1.0 + float(eps))
+        below = float(P) < float(Pa) * (1.0 - float(eps))
+
         if above:
-            return out_above_streak + 1, 0, out_above_streak_total + 1, out_below_streak_total
+            return (
+                int(out_above_streak) + 1,
+                0,
+                int(out_above_streak_total) + 1,
+                int(out_below_streak_total),
+            )
         if below:
-            return 0, out_below_streak + 1, out_above_streak_total, out_below_streak_total + 1
-        # voltou para dentro: zera só o streak, mantém os totais acumulados
-        return 0, 0, out_above_streak_total, out_below_streak_total
+            return (
+                0,
+                int(out_below_streak) + 1,
+                int(out_above_streak_total),
+                int(out_below_streak_total) + 1,
+            )
+        return 0, 0, int(out_above_streak_total), int(out_below_streak_total)
 
     @staticmethod
     def _gate_tier_runtime(
-        tier: Dict,
+        tier: RangeTierParams,
         atr_now: Optional[float],
         trend: str,
         atr_streaks: Dict[str, int],
     ) -> bool:
-        """
-        Backtest parity:
-        - Atualiza streak por tier usando threshold normal ou threshold_down (se trend == 'down' e existir)
-        - Retorna True somente quando streak >= bars_required
-        """
         if atr_now is None:
             return False
 
-        name = tier["name"]
-        bars_req = int(tier.get("bars_required", 1))
+        name = tier.name
+        bars_req = int(tier.bars_required)
 
-        thr_up = tier.get("atr_pct_threshold")
-        thr_down = tier.get("atr_pct_threshold_down")
+        thr = float(tier.atr_pct_threshold_down) if trend == "down" else float(tier.atr_pct_threshold)
 
-        if trend == "down" and thr_down is not None:
-            thr = float(thr_down)
-        elif thr_up is not None:
-            thr = float(thr_up)
-        else:
-            # sem threshold definido => nunca habilita tier
-            atr_streaks[name] = 0
-            return False
-
-        if atr_now <= thr:
+        if float(atr_now) <= thr:
             atr_streaks[name] = int(atr_streaks.get(name, 0)) + 1
         else:
             atr_streaks[name] = 0
 
-        return atr_streaks[name] >= bars_req
+        return int(atr_streaks[name]) >= bars_req
     
-    # ===== execute =====
+    # ==========================
+    # Main entrypoint
+    # ==========================
+
     async def execute_for_indicator_snapshot(self, indicator_set: Dict, indicator_snapshot: Dict) -> None:
         symbol = indicator_snapshot["symbol"]
+
         P_signal = float(indicator_snapshot["close"])
         ema_f = float(indicator_snapshot["ema_fast"])
         ema_s = float(indicator_snapshot["ema_slow"])
         atr_pct = float(indicator_snapshot["atr_pct"])
         ts = int(indicator_snapshot["ts"])
-        
+
+        # NOTE: kept as-is from your prod code
         price = await self.market_data.get_token_price_usd(
-            chain="base", 
-            token_address="0x4200000000000000000000000000000000000006"
+            chain="base",
+            token_address="0x4200000000000000000000000000000000000006",
         )
         P_exec = float(price["price_usd"])
 
         created_at_iso = indicator_snapshot.get("created_at_iso")
         if created_at_iso:
-            # trata o 'Z' do final como UTC
             if created_at_iso.endswith("Z"):
                 created_at_iso = created_at_iso.replace("Z", "+00:00")
             dt_now = datetime.fromisoformat(created_at_iso)
         else:
-            # fallback: usa ts (lembrando que está em ms)
             dt_now = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
-            
+
         strategies: List[StrategyEntity] = await self._strategy_repo.get_active_by_indicator_set(
             indicator_set_id=indicator_set["cfg_hash"]
         )
@@ -410,88 +280,60 @@ class EvaluateActiveStrategiesUseCase:
         for strat in strategies:
             if strat.alias is None:
                 continue
-            
-            params = strat.params
-            eps = float(params.get("eps", 1e-6))
-            cooloff = int(params.get("cooloff_bars", 1))
-            breakout_confirm = int(params.get("breakout_confirm_bars", 1))
-            inrange_mode = params.get("inrange_resize_mode", "skew_swap")
-            gauge_flow_enabled = bool(params.get("gauge_flow_enabled", False))
+
+            params: StrategyParams = strat.params
+
+            eps = float(params.eps)
+            cooloff = int(params.cooloff_bars)
+            breakout_confirm = int(params.breakout_confirm_bars)
+            gauge_flow_enabled = bool(params.gauge_flow_enabled)
+
             trend_now = self._trend_at(ema_f, ema_s)
-            
-            # ===== Config de LOW-VOL (janela segura) =====
-            low_vol_threshold_flag = params.get("low_vol_threshold")
-            # gating habilitado se qualquer uma das configs de low-vol estiver presente
-            gating_enabled = bool(
-                low_vol_threshold_flag is not None
-            )
-            low_vol_keys = self._get_low_vol_keys(params, gating_enabled)
-            
-            # 1) episódio atual
+
             strat_id = strat.name
             strat_stream_key = strat.stream_key
-            current = await self._episode_repo.get_open_by_strategy(strat_id)
-            if current is None:
-                # decide se estamos em low-vol efetivo agora
-                is_low_vol_now = self._is_effectively_low_vol(
-                    dt_now,
-                    atr_pct,
-                    params,
-                    low_vol_keys,
-                    gating_enabled,
-                )
 
-                if is_low_vol_now:
-                    # comportamento original: abre STANDARD pela tendência
-                    initial_pool_type = "high_vol"
-                    trend_for_pick = "down"
-                    width_override = params.get(
-                        "high_vol_max_major_side_pct",
-                        2,
-                    )
-                else:
-                    # fora de low-vol: força abrir HIGH_VOL com viés de queda
-                    initial_pool_type = "high_vol"
-                    trend_for_pick = "down"
-                    width_override = params.get(
-                        "high_vol_max_major_side_pct",
-                        2,
-                    )
-                    
-                # abre primeira banda centrada pela tendência
-                Pa, Pb, mode, majority, _, pct_below_base, pct_above_base = await self._pick_band_for_trend_totalwidth(
-                    P_exec, 
-                    trend_for_pick, 
-                    params, 
-                    atr_pct,
+            current = await self._episode_repo.get_open_by_strategy(strat_id)
+
+            # ==========================
+            # Open first episode (ALWAYS high_vol DOWN)
+            # ==========================
+            if current is None:
+                initial_pool_type = "high_vol"
+                trend_for_pick = "down"
+                width_override = float(params.high_vol_max_major_side_pct)
+
+                Pa, Pb, mode, majority, pct_below_base, pct_above_base = await self._pick_band_for_trend_totalwidth(
+                    P=P_exec,
+                    trend=trend_for_pick,
+                    params=params,
                     total_width_override=width_override,
                     pool_type=initial_pool_type,
                 )
 
+                # keep your existing convention
                 if majority == "token1":
                     major_pct = pct_below_base * 10
                     minor_pct = pct_above_base * 10
                 else:
                     major_pct = pct_above_base * 10
                     minor_pct = pct_below_base * 10
-                
+
+                # Persist band_params for pipeline parity (include NEW high-vol knobs)
                 band_params = {
-                    "skew_low_pct": pct_below_base,
-                    "skew_high_pct": pct_above_base,
-                    "standard_max_major_side_pct": float(params.get("standard_max_major_side_pct", 0.05)),
-                    "high_vol_max_major_side_pct": float(params.get("high_vol_max_major_side_pct", 2.0)),
-                    "tiers": list(params.get("tiers", [])),
+                    "skew_low_pct": float(params.skew_low_pct),
+                    "skew_high_pct": float(params.skew_high_pct),
+
+                    "high_vol_max_major_side_pct": float(params.high_vol_max_major_side_pct),
+
+                    "high_vol_base_below_pct": float(params.high_vol_base_below_pct),
+                    "high_vol_base_above_pct": float(params.high_vol_base_above_pct),
+                    "high_vol_invert_on_trend_up": bool(params.high_vol_invert_on_trend_up),
+                    "block_high_vol_up_atr_pct": float(params.block_high_vol_up_atr_pct) if params.block_high_vol_up_atr_pct is not None else None,
+
+                    "tiers": [t.model_dump(mode="python") for t in (params.tiers or [])],
                 }
 
-                # width_override já é usado no _pick_band; vamos persistir ele como width canônico do episódio
-                if width_override is not None:
-                    band_total_width_pct = float(width_override)
-                else:
-                    if initial_pool_type == "high_vol":
-                        band_total_width_pct = float(band_params["high_vol_max_major_side_pct"])
-                    else:
-                        band_total_width_pct = float(band_params["standard_max_major_side_pct"])
-                        
                 new_ep = StrategyEpisodeEntity(
                     id=f"ep_{strat_id}_{ts}",
                     stream_key=strat_stream_key,
@@ -508,21 +350,23 @@ class EvaluateActiveStrategiesUseCase:
                     open_price_exec=P_exec,
                     Pa=Pa,
                     Pb=Pb,
-                    band_total_width_pct=band_total_width_pct,
+                    band_total_width_pct=float(width_override),
                     band_params=band_params,
                     last_event_bar=0,
-                    atr_streak={tier["name"]: 0 for tier in params.get("tiers", [])},
+                    atr_streak={t.name: 0 for t in (params.tiers or [])},
                     out_above_streak=0,
                     out_below_streak=0,
                     out_above_streak_total=0,
                     out_below_streak_total=0,
                     dex=strat.dex,
                     alias=strat.alias,
-                    token0_address=params.get("token0_address"),
-                    token1_address=params.get("token1_address"),
+                    token0_address=params.token0_address,
+                    token1_address=params.token1_address,
                     gauge_flow_enabled=gauge_flow_enabled,
                 )
+
                 new_ep = await self._episode_repo.open_new(new_ep)
+
                 signal_plan = await self._reconciler.reconcile(strat_id, new_ep, symbol)
                 if signal_plan:
                     signal = SignalEntity(
@@ -534,9 +378,7 @@ class EvaluateActiveStrategiesUseCase:
                         signal_type=SignalType(signal_plan["signal_type"]),
                         status=SignalStatus.PENDING,
                         attempts=0,
-                        steps=[
-                            SignalStep(**step) for step in signal_plan["steps"]
-                        ],
+                        steps=[SignalStep(**step) for step in signal_plan["steps"]],
                         episode=new_ep,
                         last_episode=None,
                     )
@@ -545,126 +387,70 @@ class EvaluateActiveStrategiesUseCase:
                         self._on_signal_created()
                 continue
 
-            # defaults de campos antigos
+            # ==========================
+            # Evaluate current episode
+            # ==========================
             Pa_cur = float(current.Pa)
             Pb_cur = float(current.Pb)
-            pool_type_cur = current.pool_type
-            mode_on_open_cur = current.mode_on_open
-            majority_on_open_cur = current.majority_on_open
-            
-            # ===== Guard: se estamos em high_vol trend_down FORA do low-vol window,
-            # não deixamos QUALQUER sinal fechar/reabrir a pool.
-            forced_high_vol_down_locked = (
-                pool_type_cur == "high_vol"
-                and mode_on_open_cur == "trend_down"
-                and not self._is_effectively_low_vol(
-                    dt_now,
-                    atr_pct,
-                    params,
-                    low_vol_keys,
-                    gating_enabled,
-                )
-            )
-            
+            pool_type_cur = str(current.pool_type)
+
             i_since_open = int(current.last_event_bar) + 1
+
             out_above_streak = int(current.out_above_streak)
             out_below_streak = int(current.out_below_streak)
             out_above_streak_total = int(current.out_above_streak_total)
             out_below_streak_total = int(current.out_below_streak_total)
-            atr_streaks: Dict = dict(current.atr_streak)
-            
+
+            atr_streaks: Dict[str, int] = dict(current.atr_streak or {})
+
             trigger: Optional[str] = None
-            # trigger_from_periodic_pool_check = False
-            
-            # 2) primeiro: decide se vale a pena consultar o pool
+
             in_range_now = self._is_in_range(P_exec, Pa_cur, Pb_cur, eps)
 
-            # 2b) agora sim: atualiza streaks usando P/Pa/Pb "definitivos" (pool quando necessário)
             out_above_streak, out_below_streak, out_above_streak_total, out_below_streak_total = self._update_breakout_streaks(
                 P_exec, Pa_cur, Pb_cur, eps,
                 out_above_streak, out_below_streak,
                 out_above_streak_total, out_below_streak_total,
             )
 
-            # persiste os contadores mesmo sem evento
+            # persist counters
             await self._episode_repo.update_partial(current.id, {
                 "out_above_streak": out_above_streak,
                 "out_below_streak": out_below_streak,
                 "out_above_streak_total": out_above_streak_total,
                 "out_below_streak_total": out_below_streak_total,
-                "last_event_bar": i_since_open
+                "last_event_bar": i_since_open,
             })
 
-            # se estiver travado em high_vol_down fora de low-vol, NÃO gera trigger nenhum
-            if not forced_high_vol_down_locked:
-                
-                # evita que sobrescreva o trigger do do_periodic_pool_check
-                if not trigger:
-                    if out_above_streak >= breakout_confirm:
-                        trigger = "cross_max"
-                    elif out_below_streak >= breakout_confirm:
-                        trigger = "cross_min"
+            # 1) breakout trigger
+            if out_above_streak >= breakout_confirm:
+                trigger = "cross_max"
+            elif out_below_streak >= breakout_confirm:
+                trigger = "cross_min"
 
-                # 3) gate high vol (evita reabrir se já high_vol)
-                if not trigger:
-                    vol_th = params.get("vol_high_threshold_pct")
-                    vol_th_down = params.get("vol_high_threshold_pct_down")
-                    
-                    # escolhe o threshold de acordo com a tendência
-                    chosen_th: Optional[float] = None
-                    if trend_now == "down" and vol_th_down is not None:
-                        chosen_th = float(vol_th_down)
-                    elif vol_th is not None:
-                        chosen_th = float(vol_th)
-                    
-                    if (
-                        atr_pct is not None
-                        and chosen_th is not None
-                        and atr_pct > chosen_th
-                        and (
-                            pool_type_cur != "high_vol" 
-                        )
-                        
-                    ):
-                        trigger = "high_vol"
+            # 2) tiers trigger (in-range + cooldown)
+            if (not trigger) and in_range_now and (i_since_open >= cooloff):
+                chosen_tier: Optional[RangeTierParams] = None
+                for tier in reversed(params.tiers or []):
+                    if pool_type_cur == tier.name:
+                        break
+                    if pool_type_cur not in (tier.allowed_from or []):
+                        continue
+                    if self._gate_tier_runtime(tier, atr_pct, trend_now, atr_streaks):
+                        chosen_tier = tier
+                        break
 
-                # 4) tiers — apenas se in-range e sem trigger ainda
-                if (
-                    not trigger
-                    and in_range_now
-                    and i_since_open >= cooloff
-                ):
-                    tiers_cfg: List[Dict] = list(params.get("tiers", []))
-                    chosen_tier = None
-                    for tier in reversed(tiers_cfg):
-                        name = tier["name"]
-                        allowed_from = tier.get("allowed_from", []) or []
+                await self._episode_repo.update_partial(current.id, {"atr_streak": atr_streaks})
 
-                        if pool_type_cur == name:
-                            break  # já estamos neste estreitamento
-                        if pool_type_cur not in allowed_from:
-                            continue
+                if chosen_tier:
+                    trigger = f"tighten_{chosen_tier.name}"
 
-                        if self._gate_tier_runtime(tier, atr_pct, trend_now, atr_streaks):
-                            chosen_tier = tier
-                            break
-                        
-                    await self._episode_repo.update_partial(current.id, {
-                        "atr_streak": atr_streaks,
-                    })
-
-                    if chosen_tier:
-                        trigger = f"tighten_{chosen_tier['name']}"
-
-            else:
-                # travado: literalmente nada de gatilho neste candle
-                pass
-            
-            # 5) sem gatilho -> segue
             if not trigger:
                 continue
 
-            # 6) fechar episódio atual
+            # ==========================
+            # Close episode
+            # ==========================
             now_iso = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
             await self._episode_repo.close_episode(
                 current.id,
@@ -677,86 +463,60 @@ class EvaluateActiveStrategiesUseCase:
                 },
             )
 
-            # garante que o current que vai em last_episode já tenha esses campos
             current.close_time = ts
             current.close_time_iso = now_iso
             current.close_reason = trigger
             current.close_price_exec = P_exec
             current.close_price_signal = P_signal
-            
-            # helper para abrir com "total width"; aplica preserve quando aplicável
-            async def _open_with_width(next_pool_type: str, total_width_override: Optional[float]) -> StrategyEpisodeEntity:
-                # decide se é low-vol efetivo neste snapshot
-                is_low_vol_now = self._is_effectively_low_vol(
-                    dt_now,
-                    atr_pct,
-                    params,
-                    low_vol_keys,
-                    gating_enabled,
-                )
-                
-                # se NÃO for low-vol => força abrir high_vol trend_down (igual backtest)
-                if not is_low_vol_now:
-                    desired_type = "high_vol"
-                    trend_for_pick = "down"
-                    width_key_default = "high_vol_max_major_side_pct"
-                    
-                    total_width_override = params.get(
-                        "high_vol_max_major_side_pct",
-                        params.get("standard_max_major_side_pct", 2.10),
-                    )
-                else:
-                    desired_type = next_pool_type
-                    trend_for_pick = trend_now
-                    if next_pool_type == "high_vol":
-                        width_key_default = "high_vol_max_major_side_pct"
-                    else:
-                        width_key_default = "standard_max_major_side_pct"
-                        
-                if total_width_override is not None:
-                    total_width_pct = float(total_width_override)
-                else:
-                    total_width_pct = float(
-                        params.get(
-                            width_key_default,
-                            params.get("standard_max_major_side_pct", 0.05),
-                        )
-                    )
 
-                total_width_pct = max(total_width_pct, 2e-6)
-                
-                Pa_new, Pb_new, mode_now, majority_now, _, pct_below_base, pct_above_base = \
-                    await self._pick_band_for_trend_totalwidth(
-                        P_exec,
-                        trend_for_pick,
-                        params,
-                        atr_pct,
-                        total_width_override=total_width_pct,
-                        pool_type=desired_type,
-                    )
-                    
+            # ==========================
+            # Decide next episode (backtest parity)
+            # ==========================
+            async def _open_episode(next_pool_type: str, width_override: Optional[float]) -> StrategyEpisodeEntity:
+                # Trend for pick: trend_now, but BLOCK high_vol UP if ATR too high
+                trend_for_pick = trend_now
+                if next_pool_type == "high_vol" and trend_now == "up" and params.block_high_vol_up_atr_pct is not None:
+                    if atr_pct is not None and float(atr_pct) > float(params.block_high_vol_up_atr_pct):
+                        trend_for_pick = "down"
+
+                total_width = float(width_override) if width_override is not None else float(params.high_vol_max_major_side_pct)
+                total_width = max(total_width, 2e-6)
+
+                Pa_new, Pb_new, mode_now, majority_now, pct_below_base, pct_above_base = await self._pick_band_for_trend_totalwidth(
+                    P=P_exec,
+                    trend=trend_for_pick,
+                    params=params,
+                    total_width_override=total_width,
+                    pool_type=next_pool_type,
+                )
+
                 if majority_now == "token1":
-                    major_pct = pct_below_base*10
-                    minor_pct = pct_above_base*10
-                    
-                else:  # majority == "token2"
-                    major_pct = pct_above_base*10
-                    minor_pct = pct_below_base*10
-                
+                    major_pct = pct_below_base * 10
+                    minor_pct = pct_above_base * 10
+                else:
+                    major_pct = pct_above_base * 10
+                    minor_pct = pct_below_base * 10
+
                 band_params = {
-                    "skew_low_pct": pct_below_base,
-                    "skew_high_pct": pct_above_base,
-                    "standard_max_major_side_pct": float(params.get("standard_max_major_side_pct", 0.05)),
-                    "high_vol_max_major_side_pct": float(params.get("high_vol_max_major_side_pct", 2.0)),
-                    "tiers": list(params.get("tiers", [])),
+                    "skew_low_pct": float(params.skew_low_pct),
+                    "skew_high_pct": float(params.skew_high_pct),
+
+                    "high_vol_max_major_side_pct": float(params.high_vol_max_major_side_pct),
+
+                    "high_vol_base_below_pct": float(params.high_vol_base_below_pct),
+                    "high_vol_base_above_pct": float(params.high_vol_base_above_pct),
+                    "high_vol_invert_on_trend_up": bool(params.high_vol_invert_on_trend_up),
+                    "block_high_vol_up_atr_pct": float(params.block_high_vol_up_atr_pct) if params.block_high_vol_up_atr_pct is not None else None,
+
+                    "tiers": [t.model_dump(mode="python") for t in (params.tiers or [])],
                 }
-                                
+
                 return StrategyEpisodeEntity(
                     id=f"ep_{strat_id}_{ts}",
                     strategy_id=strat_id,
                     stream_key=strat_stream_key,
                     symbol=symbol,
-                    pool_type=desired_type,
+                    pool_type=next_pool_type,
                     mode_on_open=mode_now,
                     majority_on_open=majority_now,
                     target_major_pct=major_pct,
@@ -767,87 +527,44 @@ class EvaluateActiveStrategiesUseCase:
                     open_price_signal=P_signal,
                     Pa=Pa_new,
                     Pb=Pb_new,
-                    band_total_width_pct=total_width_pct,
+                    band_total_width_pct=total_width,
                     band_params=band_params,
                     last_event_bar=0,
-                    atr_streak={tier["name"]: 0 for tier in params.get("tiers", [])},
+                    atr_streak={t.name: 0 for t in (params.tiers or [])},
                     out_above_streak=0,
                     out_below_streak=0,
                     out_above_streak_total=0,
                     out_below_streak_total=0,
                     dex=strat.dex,
                     alias=strat.alias,
-                    token0_address=params.get("token0_address"),
-                    token1_address=params.get("token1_address"),
+                    token0_address=params.token0_address,
+                    token1_address=params.token1_address,
                     gauge_flow_enabled=gauge_flow_enabled,
                 )
 
-            # 7) escolher próxima pool
             new_ep: Optional[StrategyEpisodeEntity] = None
-            tiers_cfg: List[Dict] = list(params.get("tiers", []))
-            
-            if trigger in ("cross_min", "cross_max"):
+
+            if trigger in ("cross_min", "cross_max") or trigger.startswith("tighten_"):
                 chosen_tier = None
-
-                for tier in reversed(tiers_cfg):
-                    allowed_from = tier.get("allowed_from", []) or []
-                    if pool_type_cur not in allowed_from:
+                for tier in reversed(params.tiers or []):
+                    if pool_type_cur not in (tier.allowed_from or []):
                         continue
-
                     if self._gate_tier_runtime(tier, atr_pct, trend_now, atr_streaks):
                         chosen_tier = tier
                         break
 
-                # persistir streak atualizado (paridade)
-                await self._episode_repo.update_partial(current.id, {
-                    "atr_streak": atr_streaks,
-                })
+                await self._episode_repo.update_partial(current.id, {"atr_streak": atr_streaks})
 
                 if chosen_tier:
-                    new_ep = await _open_with_width(
-                        chosen_tier["name"],
-                        float(chosen_tier["max_major_side_pct"]),
-                    )
+                    new_ep = await _open_episode(chosen_tier.name, float(chosen_tier.max_major_side_pct))
                 else:
-                    new_ep = await _open_with_width(
-                        "high_vol",
-                        float(params.get("high_vol_max_major_side_pct", 2.05)),
-                    )
-                    
-            elif trigger == "high_vol":
-                new_ep = await _open_with_width("high_vol", float(params.get("high_vol_max_major_side_pct", 2.10)))
-            elif trigger.startswith("tighten_"):
-                chosen_tier = None
-
-                for tier in reversed(tiers_cfg):
-                    allowed_from = tier.get("allowed_from", []) or []
-                    if pool_type_cur not in allowed_from:
-                        continue
-
-                    if self._gate_tier_runtime(tier, atr_pct, trend_now, atr_streaks):
-                        chosen_tier = tier
-                        break
-
-                # persistir streak atualizado (paridade)
-                await self._episode_repo.update_partial(current.id, {
-                    "atr_streak": atr_streaks,
-                })
-
-                if chosen_tier:
-                    new_ep = await _open_with_width(
-                        chosen_tier["name"],
-                        float(chosen_tier["max_major_side_pct"]),
-                    )
-                else:
-                    new_ep = await _open_with_width(
-                        "high_vol",
-                        float(params.get("high_vol_max_major_side_pct", 2.05)),
-                    )
+                    new_ep = await _open_episode("high_vol", float(params.high_vol_max_major_side_pct))
 
             if not new_ep:
                 continue
-            
+
             await self._episode_repo.open_new(new_ep)
+
             signal_plan = await self._reconciler.reconcile(strat_id, new_ep, symbol)
             if signal_plan:
                 signal = SignalEntity(
