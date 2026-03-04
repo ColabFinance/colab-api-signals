@@ -9,6 +9,7 @@ from adapters.external.market_data.market_data_http_client import MarketDataHttp
 from adapters.external.notify.telegram_notifier import TelegramNotifier
 from core.common.utils import sanitize_for_bson
 from core.domain.entities.signal_entity import SignalEntity
+from core.domain.entities.strategy_episode_entity import StrategyEpisodeEntity
 from core.repositories.strategy_episode_repository import StrategyEpisodeRepository
 from core.services.idempotency_key_service import IdempotencyKeyService
 from core.usecases.evaluate_active_strategies_use_case import EvaluateActiveStrategiesUseCase
@@ -272,7 +273,7 @@ class ExecuteSignalPipelineUseCase:
     async def _compute_dynamic_range_after_status(
         self,
         st: Dict,
-        episode: Dict,
+        episode: StrategyEpisodeEntity,
     ) -> Tuple[float, float, Dict[str, Any]]:
         """
         Recalcula (Pa, Pb) SEMPRE depois do get_status() (evita defasagem).
@@ -302,33 +303,24 @@ class ExecuteSignalPipelineUseCase:
             P_h = p_t1_t0_spot
             human_is_t0_t1 = False
 
-        mode_on_open = (episode.get("mode_on_open") or "").lower()
+        mode_on_open = (episode.mode_on_open or "").lower()
         trend_for_pick = "down" if "down" in mode_on_open else "up"
 
-        pool_type = episode.get("pool_type") or "standard"
+        pool_type = episode.pool_type or "standard"
+        band_params = episode.band_params
 
-        band_params = dict(episode.get("band_params") or {})
-        band_params.setdefault("skew_low_pct", 0.075)
-        band_params.setdefault("skew_high_pct", 0.025)
-        band_params.setdefault("standard_max_major_side_pct", 0.05)
-        band_params.setdefault("high_vol_max_major_side_pct", 2.0)
-        band_params.setdefault("tiers", [])
-
-        total_width_override = episode.get("band_total_width_pct")
+        total_width_override = episode.band_total_width_pct
         if total_width_override is None:
             if pool_type == "high_vol":
-                total_width_override = band_params.get("high_vol_max_major_side_pct")
-            elif pool_type == "standard" or pool_type is None:
-                total_width_override = band_params.get("standard_max_major_side_pct")
+                total_width_override = float(band_params.high_vol_max_major_side_pct)
             else:
-                total_width_override = band_params.get("max_major_side_pct")
+                total_width_override = None
 
         picker = EvaluateActiveStrategiesUseCase.__new__(EvaluateActiveStrategiesUseCase)
-        Pa_h, Pb_h, _, _, _, _, _ = await picker._pick_band_for_trend_totalwidth(
+        Pa_h, Pb_h, _, _, _, _= await picker._pick_band_for_trend_totalwidth(
             P=float(P_h),
             trend=trend_for_pick,
             params=band_params,
-            atr_pct_now=None,
             total_width_override=float(total_width_override) if total_width_override is not None else None,
             pool_type=pool_type,
         )
@@ -453,17 +445,17 @@ class ExecuteSignalPipelineUseCase:
         """
         steps = [s.model_dump(mode="python") for s in sig.steps]
         
-        last_episode = sig.last_episode.model_dump(mode="python") if sig.last_episode else {}
-        last_episode_id = last_episode.get("id") or last_episode.get("_id")
+        last_episode = sig.last_episode
+        last_episode_id = (last_episode.id if last_episode else None)
 
-        episode = sig.episode.model_dump(mode="python")
-        episode_id = episode.get("id") or episode.get("_id")
+        episode = sig.episode
+        episode_id = episode.id
 
-        dex = episode.get("dex")
-        alias = episode.get("alias")
-        token0_addr = episode.get("token0_address")
-        token1_addr = episode.get("token1_address")
-        majority_flag = episode.get("majority_on_open")
+        dex = episode.dex
+        alias = episode.alias
+        token0_addr = episode.token0_address
+        token1_addr = episode.token1_address
+        majority_flag = episode.majority_on_open
 
         batch_res = None
         
@@ -660,7 +652,7 @@ class ExecuteSignalPipelineUseCase:
                             risk_needed_usd = t0_needed * usd_per_t0
                             usd_needed_usd  = t1_needed * usd_per_t1
 
-                        majority_flag = (episode.get("majority_on_open") or "").lower()  # "token1" (usd-like) | "token2" (risco)
+                        majority_flag = (episode.majority_on_open or "").lower()
                         align_usd = (majority_flag == "token1")
 
                         falta_usd = (usd_needed_usd - usd_usd_now) if align_usd else (risk_needed_usd - risk_usd_now)
@@ -797,9 +789,9 @@ class ExecuteSignalPipelineUseCase:
                                         "open_price_exec": float(P_h),
                                     },
                                 )
-                            episode["Pa"] = float(lower_price)
-                            episode["Pb"] = float(upper_price)
-                            episode["open_price_exec"] = float(P_h)
+                            episode.Pa = float(lower_price)
+                            episode.Pb = float(upper_price)
+                            episode.open_price_exec = float(P_h)
                         except Exception:
                             pass
                         
@@ -875,9 +867,9 @@ class ExecuteSignalPipelineUseCase:
                                         "open_price_exec": float(P_h),
                                     },
                                 )
-                            episode["Pa"] = float(lower_price)
-                            episode["Pb"] = float(upper_price)
-                            episode["open_price_exec"] = float(P_h)
+                            episode.Pa = float(lower_price)
+                            episode.Pb = float(upper_price)
+                            episode.open_price_exec = float(P_h)
                         except Exception:
                             pass
                         
@@ -1045,9 +1037,9 @@ class ExecuteSignalPipelineUseCase:
                     totals = holdings.get("totals") or {}
                     totals_usd = float(totals.get("total_usd") or 0.0)
 
-                qty_candles = int(last_episode.get("last_event_bar") or 0)
-                out_above_streak_total = int(last_episode.get("out_above_streak_total") or 0)
-                out_below_streak_total = int(last_episode.get("out_below_streak_total") or 0)
+                qty_candles = int(last_episode.last_event_bar or 0)
+                out_above_streak_total = int(last_episode.out_above_streak_total or 0)
+                out_below_streak_total = int(last_episode.out_below_streak_total or 0)
                 total_candle_out = out_above_streak_total + out_below_streak_total
 
                 qty_candles_in_formula = float(qty_candles - total_candle_out)
@@ -1079,23 +1071,23 @@ class ExecuteSignalPipelineUseCase:
                 tick_calc_reason = None
 
                 prev_open_ts = (
-                    last_episode.get("open_time_iso")
-                    or last_episode.get("created_at_iso")
+                    last_episode.open_time_iso
+                    or last_episode.created_at_iso
                 )
                 prev_close_ts = (
-                    last_episode.get("close_time_iso")
-                    or last_episode.get("close_time")
+                    last_episode.close_time_iso
+                    or last_episode.close_time
                 )
 
-                prev_lower = last_episode.get("Pa")
-                prev_upper = last_episode.get("Pb")
+                prev_lower = last_episode.Pa
+                prev_upper = last_episode.Pb
 
                 ts_from_ms = self._parse_ts_ms(prev_open_ts)
                 ts_to_ms = self._parse_ts_ms(prev_close_ts)
 
                 stream_key = (
-                    last_episode.get("stream_key")
-                    or episode.get("stream_key")
+                    last_episode.stream_key
+                    or episode.stream_key
                 )
 
                 # ticks.price costuma ser p_t1_t0 (token1 per token0).
@@ -1168,29 +1160,29 @@ class ExecuteSignalPipelineUseCase:
                 # 7) Metadados de episódio
                 # -------------------------
                 cur_open_ts = (
-                    episode.get("open_time_iso")
-                    or episode.get("created_at_iso")
+                    episode.open_time_iso
+                    or episode.created_at_iso
                 )
 
-                cur_lower = episode.get("Pa") or episode.get("lower_price") or episode.get("range_lower")
-                cur_upper = episode.get("Pb") or episode.get("upper_price") or episode.get("range_upper")
+                cur_lower = episode.Pa
+                cur_upper = episode.Pb
 
                 prev_labels = {
-                    "pool_type": last_episode.get("pool_type"),
-                    "mode_on_open": last_episode.get("mode_on_open"),
-                    "majority_on_open": last_episode.get("majority_on_open"),
-                    "target_major_pct": last_episode.get("target_major_pct"),
-                    "target_minor_pct": last_episode.get("target_minor_pct"),
-                    "open_price_exec": (last_episode.get("open_price_exec") or 0.0)
+                    "pool_type": last_episode.pool_type,
+                    "mode_on_open": last_episode.mode_on_open,
+                    "majority_on_open": last_episode.majority_on_open,
+                    "target_major_pct": last_episode.target_major_pct,
+                    "target_minor_pct": last_episode.target_minor_pct,
+                    "open_price_exec": (last_episode.open_price_exec or 0.0)
                 }
 
                 cur_labels = {
-                    "pool_type": episode.get("pool_type"),
-                    "mode_on_open": episode.get("mode_on_open"),
-                    "majority_on_open": episode.get("majority_on_open"),
-                    "target_major_pct": episode.get("target_major_pct"),
-                    "target_minor_pct": episode.get("target_minor_pct"),
-                    "open_price_exec": (episode.get("open_price_exec") or 0.0)
+                    "pool_type": episode.pool_type,
+                    "mode_on_open": episode.mode_on_open,
+                    "majority_on_open": episode.majority_on_open,
+                    "target_major_pct": episode.target_major_pct,
+                    "target_minor_pct": episode.target_minor_pct,
+                    "open_price_exec": (episode.open_price_exec or 0.0)
                 }
 
                 episode_meta = {
