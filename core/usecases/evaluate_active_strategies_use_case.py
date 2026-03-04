@@ -256,7 +256,6 @@ class EvaluateActiveStrategiesUseCase:
         atr_pct = float(indicator_snapshot["atr_pct"])
         ts = int(indicator_snapshot["ts"])
 
-        # NOTE: kept as-is from your prod code
         price = await self.market_data.get_token_price_usd(
             chain="base",
             token_address="0x4200000000000000000000000000000000000006",
@@ -311,7 +310,6 @@ class EvaluateActiveStrategiesUseCase:
                     pool_type=initial_pool_type,
                 )
 
-                # keep your existing convention
                 if majority == "token1":
                     major_pct = pct_below_base * 10
                     minor_pct = pct_above_base * 10
@@ -319,20 +317,7 @@ class EvaluateActiveStrategiesUseCase:
                     major_pct = pct_above_base * 10
                     minor_pct = pct_below_base * 10
 
-                # Persist band_params for pipeline parity (include NEW high-vol knobs)
-                band_params = {
-                    "skew_low_pct": float(params.skew_low_pct),
-                    "skew_high_pct": float(params.skew_high_pct),
-
-                    "high_vol_max_major_side_pct": float(params.high_vol_max_major_side_pct),
-
-                    "high_vol_base_below_pct": float(params.high_vol_base_below_pct),
-                    "high_vol_base_above_pct": float(params.high_vol_base_above_pct),
-                    "high_vol_invert_on_trend_up": bool(params.high_vol_invert_on_trend_up),
-                    "block_high_vol_up_atr_pct": float(params.block_high_vol_up_atr_pct) if params.block_high_vol_up_atr_pct is not None else None,
-
-                    "tiers": [t.model_dump(mode="python") for t in (params.tiers or [])],
-                }
+                band_params_obj = params.model_copy(deep=True)
 
                 new_ep = StrategyEpisodeEntity(
                     id=f"ep_{strat_id}_{ts}",
@@ -351,7 +336,7 @@ class EvaluateActiveStrategiesUseCase:
                     Pa=Pa,
                     Pb=Pb,
                     band_total_width_pct=float(width_override),
-                    band_params=band_params,
+                    band_params=band_params_obj,
                     last_event_bar=0,
                     atr_streak={t.name: 0 for t in (params.tiers or [])},
                     out_above_streak=0,
@@ -497,19 +482,7 @@ class EvaluateActiveStrategiesUseCase:
                     major_pct = pct_above_base * 10
                     minor_pct = pct_below_base * 10
 
-                band_params = {
-                    "skew_low_pct": float(params.skew_low_pct),
-                    "skew_high_pct": float(params.skew_high_pct),
-
-                    "high_vol_max_major_side_pct": float(params.high_vol_max_major_side_pct),
-
-                    "high_vol_base_below_pct": float(params.high_vol_base_below_pct),
-                    "high_vol_base_above_pct": float(params.high_vol_base_above_pct),
-                    "high_vol_invert_on_trend_up": bool(params.high_vol_invert_on_trend_up),
-                    "block_high_vol_up_atr_pct": float(params.block_high_vol_up_atr_pct) if params.block_high_vol_up_atr_pct is not None else None,
-
-                    "tiers": [t.model_dump(mode="python") for t in (params.tiers or [])],
-                }
+                band_params_obj2 = params.model_copy(deep=True)
 
                 return StrategyEpisodeEntity(
                     id=f"ep_{strat_id}_{ts}",
@@ -528,7 +501,7 @@ class EvaluateActiveStrategiesUseCase:
                     Pa=Pa_new,
                     Pb=Pb_new,
                     band_total_width_pct=total_width,
-                    band_params=band_params,
+                    band_params=band_params_obj2,
                     last_event_bar=0,
                     atr_streak={t.name: 0 for t in (params.tiers or [])},
                     out_above_streak=0,
