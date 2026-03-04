@@ -5,7 +5,7 @@ from .base_entity import MongoEntity
 
 class StrategyEpisodeEntity(MongoEntity):
     strategy_id: str
-    stream_key: str
+    stream_key: Optional[str] = None
     symbol: str
 
     pool_type: str = "standard"
