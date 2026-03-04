@@ -61,7 +61,7 @@ async def upsert_strategy_params(
         uc = get_use_case(db)
         await uc.ensure_indexes()
 
-        ent = await uc.upsert_params(data=body.model_dump())
+        ent = await uc.upsert_params(data=body)
         data = StrategyParamsOut.model_validate(ent.model_dump())
         return {"ok": True, "message": "ok", "data": data}
     except HTTPException:
@@ -85,7 +85,7 @@ async def register_strategy(
         uc = get_use_case(db)
         await uc.ensure_indexes()
 
-        ent = await uc.upsert_registry_metadata(data=body.model_dump())
+        ent = await uc.upsert_registry_metadata(data=body)
         data = StrategyParamsOut.model_validate(ent.model_dump())
         return {"ok": True, "message": "ok", "data": data}
     except HTTPException:

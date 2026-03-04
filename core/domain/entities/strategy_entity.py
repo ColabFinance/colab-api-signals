@@ -8,6 +8,7 @@ class StrategyEntity(MongoEntity):
     symbol: str
     status: str
     indicator_set_id: str
+    stream_key: str
     params: Dict[str, Any] = Field(default_factory=dict)
 
     alias: Optional[str] = None
