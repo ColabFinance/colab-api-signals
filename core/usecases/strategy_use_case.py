@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from adapters.entry.http.dtos.strategy_dtos import StrategyParamsUpsertRequest, StrategyRegisterRequest
-from core.domain.entities.strategy_entity import StrategyEntity
+from core.domain.entities.strategy_entity import StrategyEntity, StrategyParams
 from core.repositories.strategy_repository import StrategyRepository
 
 
@@ -49,7 +49,8 @@ class StrategyParamsUseCase:
         indicator_set_id = _norm(data.indicator_set_id)
         stream_key = _norm(data.stream_key)
         status = _norm(data.status) or "ACTIVE"
-        params = data.params or {}
+        
+        params_obj: StrategyParams = data.params or StrategyParams()
 
         if not name:
             raise ValueError("name is required")
@@ -57,8 +58,6 @@ class StrategyParamsUseCase:
             raise ValueError("symbol is required")
         if not indicator_set_id:
             raise ValueError("indicator_set_id is required")
-        if not isinstance(params, dict):
-            raise ValueError("params must be an object")
 
         ent = StrategyEntity(
             name=name,
@@ -66,7 +65,7 @@ class StrategyParamsUseCase:
             status=status,
             indicator_set_id=indicator_set_id,
             stream_key=stream_key,
-            params=params,
+            params=params_obj,
 
             chain=chain,
             owner=owner,
@@ -117,7 +116,7 @@ class StrategyParamsUseCase:
             indicator_set_id=indicator_set_id,
             stream_key=stream_key,
             status=status,
-            params={},  # init
+            params=StrategyParams(),  # init
 
             chain=chain,
             owner=owner,
