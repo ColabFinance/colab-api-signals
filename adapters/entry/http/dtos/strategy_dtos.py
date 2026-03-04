@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Literal, Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 from web3 import Web3
+
+from core.domain.entities.strategy_entity import StrategyParams
 
 
 ChainKey = Literal["base", "bnb"]
@@ -18,7 +20,8 @@ class StrategyParamsUpsertRequest(BaseModel):
     indicator_set_id: str = Field(..., description="Use the indicator set cfg_hash")
     stream_key: str = Field(..., description="Indicator set stream key")
     status: str = Field("ACTIVE", examples=["ACTIVE", "INACTIVE"])
-    params: Dict[str, Any] = Field(default_factory=dict)
+    
+    params: StrategyParams = Field(default_factory=StrategyParams)
 
     adapter: Optional[str] = None
     dex_router: Optional[str] = None
@@ -67,7 +70,7 @@ class StrategyParamsOut(BaseModel):
     symbol: str
     status: str
     indicator_set_id: str
-    params: Optional[Dict[str, Any]] = None
+    params: Optional[StrategyParams] = None
 
     chain: Optional[str] = None
     owner: Optional[str] = None
@@ -83,8 +86,6 @@ class StrategyParamsOut(BaseModel):
     updated_at: Optional[int] = None
     updated_at_iso: Optional[str] = None
 
-
-from typing import Literal
 
 class StrategyRegisterRequest(BaseModel):
     chain: ChainKey
