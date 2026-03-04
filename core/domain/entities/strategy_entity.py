@@ -51,10 +51,6 @@ class StrategyParams(BaseModel):
     # tiers
     tiers: List[RangeTierParams] = Field(default_factory=list)
 
-    # token addresses (kept for lp pipeline)
-    token0_address: Optional[str] = None
-    token1_address: Optional[str] = None
-
     model_config = ConfigDict(extra="allow")
 
 

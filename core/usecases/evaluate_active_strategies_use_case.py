@@ -360,8 +360,8 @@ class EvaluateActiveStrategiesUseCase:
                     out_below_streak_total=0,
                     dex=strat.dex,
                     alias=strat.alias,
-                    token0_address=params.token0_address,
-                    token1_address=params.token1_address,
+                    token0_address=strat.token0,
+                    token1_address=strat.token1,
                     gauge_flow_enabled=gauge_flow_enabled,
                 )
 
@@ -537,8 +537,8 @@ class EvaluateActiveStrategiesUseCase:
                     out_below_streak_total=0,
                     dex=strat.dex,
                     alias=strat.alias,
-                    token0_address=params.token0_address,
-                    token1_address=params.token1_address,
+                    token0_address=strat.token0,
+                    token1_address=strat.token1,
                     gauge_flow_enabled=gauge_flow_enabled,
                 )
 
