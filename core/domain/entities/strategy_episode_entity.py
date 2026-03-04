@@ -1,6 +1,8 @@
 # core/domain/entities/strategy_episode_entity.py
 from typing import Any, Dict, List, Optional
 from pydantic import ConfigDict, Field
+
+from core.domain.entities.strategy_entity import StrategyParams
 from .base_entity import MongoEntity
 
 class StrategyEpisodeEntity(MongoEntity):
@@ -23,7 +25,7 @@ class StrategyEpisodeEntity(MongoEntity):
     Pb: float
 
     band_total_width_pct: Optional[float] = None
-    band_params: Dict[str, Any] = Field(default_factory=dict)
+    band_params: StrategyParams = Field(default_factory=StrategyParams)
     
     last_event_bar: int = 0
 
