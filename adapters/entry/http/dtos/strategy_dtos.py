@@ -18,7 +18,7 @@ class StrategyParamsUpsertRequest(BaseModel):
     name: str = Field(..., examples=["pancake-weth4"])
     symbol: str = Field(..., examples=["ETHUSDT"])
     indicator_set_id: str = Field(..., description="Use the indicator set cfg_hash")
-    stream_key: str = Field(..., description="Indicator set stream key")
+    stream_key: Optional[str] = None
     status: str = Field("ACTIVE", examples=["ACTIVE", "INACTIVE"])
     
     params: StrategyParams = Field(default_factory=StrategyParams)
@@ -96,7 +96,7 @@ class StrategyRegisterRequest(BaseModel):
 
     symbol: str = Field(..., examples=["ETHUSDT"])
     indicator_set_id: str = Field(..., description="Use the indicator set cfg_hash")
-    stream_key: str = Field(..., description="Indicator set stream key")
+    stream_key: Optional[str] = None
     
     status: str = Field("INACTIVE", examples=["ACTIVE", "INACTIVE"])
     adapter: Optional[str] = None

@@ -59,7 +59,7 @@ class StrategyEntity(MongoEntity):
     symbol: str
     status: str
     indicator_set_id: str
-    stream_key: str
+    stream_key: Optional[str] = None
 
     params: StrategyParams = Field(default_factory=StrategyParams)
 
