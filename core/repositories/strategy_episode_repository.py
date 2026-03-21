@@ -1,50 +1,38 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List, Optional
 
 from core.domain.entities.strategy_episode_entity import StrategyEpisodeEntity
 
 
 class StrategyEpisodeRepository(ABC):
-    """
-    Repository interface for managing open/closed episodes (active bands) per strategy.
-    """
-
     @abstractmethod
     async def ensure_indexes(self) -> None:
-        """Indexes for (strategy_id,status) and time-ordered queries."""
         raise NotImplementedError
 
     @abstractmethod
     async def get_open_by_strategy(self, strategy_id: str) -> Optional[StrategyEpisodeEntity]:
-        """Return the OPEN episode for a strategy or None."""
         raise NotImplementedError
 
     @abstractmethod
     async def open_new(self, episode: StrategyEpisodeEntity) -> StrategyEpisodeEntity:
-        """Insert a new OPEN episode; returns the stored document."""
         raise NotImplementedError
 
     @abstractmethod
-    async def close_episode(self, episode_id: str, close_fields: Dict) -> None:
-        """Mark an episode CLOSED with provided fields (reason, times, metrics)."""
+    async def close_episode(self, episode_id: str, close_fields: dict) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    async def update_partial(self, episode_id: str, partial: Dict) -> None:
-        """Patch fields on the open episode (e.g., streaks, last_event_bar)."""
+    async def update_partial(self, episode_id: str, partial: dict) -> None:
         raise NotImplementedError
 
     @abstractmethod
     async def list_by_strategy(self, strategy_id: str, limit: int = 50) -> List[StrategyEpisodeEntity | None]:
-        """History: recent episodes for a strategy."""
         raise NotImplementedError
 
     @abstractmethod
-    async def append_execution_log(
-        self,
-        episode_id: str,
-        log: Dict[str, Any],
-    ) -> None:
+    async def append_execution_log(self, episode_id: str, log: Dict[str, Any]) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -60,5 +48,19 @@ class StrategyEpisodeRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def count_by_vault(self, *, dex: str, alias: str, status: Optional[str] = None) -> int:
+    async def count_by_vault(
+        self,
+        *,
+        dex: str,
+        alias: str,
+        status: Optional[str] = None,
+    ) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def summarize_by_vault_refs(
+        self,
+        *,
+        refs: List[Dict[str, str]],
+    ) -> List[Dict[str, Any]]:
         raise NotImplementedError
