@@ -65,6 +65,8 @@ class StrategyEntity(MongoEntity):
 
     alias: Optional[str] = None
     dex: Optional[str] = None
+    is_public: bool = True
+
     chain: Optional[str] = None  # "base" | "bnb"
     owner: Optional[str] = None  # lowercase 0x...
     strategy_id: Optional[int] = None  # onchain strategyId (uint)

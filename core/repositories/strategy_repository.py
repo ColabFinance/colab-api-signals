@@ -52,3 +52,14 @@ class StrategyRepository(ABC):
         List strategy docs by (chain, owner), optionally filtering by status.
         """
         raise NotImplementedError
+    
+    @abstractmethod
+    async def list_public(
+        self,
+        *,
+        chain: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> List[StrategyEntity]:
+        raise NotImplementedError
