@@ -5,6 +5,13 @@ from typing import List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.domain.entities.base_entity import MongoEntity
+from core.domain.enums.trade_enums import (
+    TradeAtrThresholdMode,
+    TradeExecutionTarget,
+    TradeMode,
+    TradeStrategyStatus,
+    TradeStrategyType,
+)
 
 
 class TradeStrategyParamsEntity(BaseModel):
@@ -18,13 +25,16 @@ class TradeStrategyParamsEntity(BaseModel):
     atr_window: int
     atr_low_threshold: float
     atr_high_threshold: float
-    atr_threshold_mode: str = "atr_pct"
+    atr_threshold_mode: TradeAtrThresholdMode = TradeAtrThresholdMode.ATR_PCT
     cooloff_bars: int = 1
-    trade_mode: str = "flip"
+    trade_mode: TradeMode = TradeMode.FLIP
     reverse_signal: bool = False
     allowed_weekdays: Optional[List[str]] = None
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(
+        extra="ignore",
+        use_enum_values=True,
+    )
 
 
 class TradeStrategyEntity(MongoEntity):
@@ -41,12 +51,15 @@ class TradeStrategyEntity(MongoEntity):
     interval: str
     stream_key: str
 
-    strategy_type: str = "atr_two_stage"
-    status: str = "ACTIVE"
+    strategy_type: TradeStrategyType = TradeStrategyType.ATR_TWO_STAGE
+    status: TradeStrategyStatus = TradeStrategyStatus.ACTIVE
 
-    execution_target: str = "api-trade-execution"
+    execution_target: TradeExecutionTarget = TradeExecutionTarget.API_TRADE_EXECUTION
     execution_account_id: Optional[str] = None
 
-    params: TradeStrategyParamsEntity = Field(default_factory=TradeStrategyParamsEntity)
+    params: TradeStrategyParamsEntity = Field(...)
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(
+        extra="ignore",
+        use_enum_values=True,
+    )

@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 from pydantic import ConfigDict, Field
 
 from core.domain.entities.base_entity import MongoEntity
+from core.domain.enums.trade_enums import TradeSignalStatus, TradeSignalType
 
 
 class TradeSignalEntity(MongoEntity):
@@ -21,8 +22,8 @@ class TradeSignalEntity(MongoEntity):
     interval: str
     ts: int
 
-    signal_type: str
-    status: str = "PENDING"
+    signal_type: TradeSignalType
+    status: TradeSignalStatus = TradeSignalStatus.PENDING
 
     idempotency_key: str
     payload: Dict[str, Any] = Field(default_factory=dict)
@@ -31,4 +32,7 @@ class TradeSignalEntity(MongoEntity):
     last_error: Optional[str] = None
     execution_response: Optional[Dict[str, Any]] = None
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(
+        extra="ignore",
+        use_enum_values=True,
+    )

@@ -14,6 +14,7 @@ from adapters.external.market_data.market_data_http_client import MarketDataHttp
 from adapters.external.notify.telegram_notifier import TelegramNotifier
 from adapters.external.trade_execution.trade_execution_http_client import TradeExecutionHttpClient
 from core.domain.entities.trade_signal_entity import TradeSignalEntity
+from core.domain.enums.trade_enums import TradeSignalType
 from core.repositories.trade_signal_repository import TradeSignalRepository
 from core.repositories.trade_strategy_runtime_snapshot_repository import (
     TradeStrategyRuntimeSnapshotRepository,
@@ -120,6 +121,10 @@ class ExecuteTradeSignalPipelineUseCase:
                     self._max_retries,
                     exc,
                 )
+
+                if self._is_non_retryable_error(last_error):
+                    break
+
                 await asyncio.sleep(self._base_backoff_sec * (attempt + 1))
 
         await self._trade_signal_repo.mark_failure(signal, last_error or "unknown trade execution error")
@@ -134,10 +139,10 @@ class ExecuteTradeSignalPipelineUseCase:
         """
         Dispatch one trade signal to the appropriate api-trade-execution endpoint.
         """
-        signal_type = str(signal.signal_type).upper()
+        signal_type = signal.signal_type
 
-        if signal_type in {"OPEN_LONG", "OPEN_SHORT"}:
-            position_side = "LONG" if signal_type == "OPEN_LONG" else "SHORT"
+        if signal_type in {TradeSignalType.OPEN_LONG, TradeSignalType.OPEN_SHORT}:
+            position_side = "LONG" if signal_type == TradeSignalType.OPEN_LONG else "SHORT"
             return await self._trade_execution_client.open_position(
                 strategy_id=str(signal.strategy_id),
                 execution_account_id=execution_account_id,
@@ -145,16 +150,20 @@ class ExecuteTradeSignalPipelineUseCase:
                 position_side=position_side,
                 signal_id=str(signal.id) if signal.id else None,
                 signal_ts=int(signal.ts),
-                signal_type=signal_type,
+                signal_type=signal_type.value,
                 idempotency_key=str(signal.idempotency_key),
             )
 
-        if signal_type in {"CLOSE_LONG", "CLOSE_SHORT", "CLOSE_POSITION"}:
+        if signal_type in {
+            TradeSignalType.CLOSE_LONG,
+            TradeSignalType.CLOSE_SHORT,
+            TradeSignalType.CLOSE_POSITION,
+        }:
             return await self._trade_execution_client.close_position(
                 strategy_id=str(signal.strategy_id),
                 execution_account_id=execution_account_id,
                 symbol=str(signal.symbol).upper(),
-                close_reason=signal_type,
+                close_reason=signal_type.value,
                 signal_id=str(signal.id) if signal.id else None,
                 signal_ts=int(signal.ts),
                 idempotency_key=str(signal.idempotency_key),
@@ -189,6 +198,7 @@ class ExecuteTradeSignalPipelineUseCase:
                     [
                         "",
                         "*Runtime atual da estratégia*",
+                        f"• STATE: `{getattr(runtime, 'runtime_state', None)}`",
                         f"• ATR: `{runtime.atr}`",
                         f"• ATR_PCT: `{runtime.atr_pct}`",
                         f"• LOW_ATR_HIT: `{runtime.low_atr_hit}`",
@@ -198,6 +208,7 @@ class ExecuteTradeSignalPipelineUseCase:
                         f"• DESIRED_SIDE: `{runtime.desired_side}`",
                         f"• POSITION_SIDE: `{runtime.position_side}`",
                         f"• EVENT: `{runtime.event}`",
+                        f"• BARS_SINCE_LAST_EVENT: `{getattr(runtime, 'bars_since_last_event', None)}`",
                         f"• CLOSE: `{runtime.close}`",
                     ]
                 )
@@ -207,7 +218,7 @@ class ExecuteTradeSignalPipelineUseCase:
 
             if chart_path is not None:
                 try:
-                    await self._notifier.send_photo(chart_path, caption=f"{signal.symbol} - {signal.signal_type}")
+                    await self._notifier.send_photo(chart_path, caption=f"{signal.symbol} - {signal.signal_type.value}")
                 finally:
                     try:
                         os.remove(chart_path)
@@ -295,3 +306,18 @@ class ExecuteTradeSignalPipelineUseCase:
                 lock = asyncio.Lock()
                 self._locks[key] = lock
             return lock
+
+    def _is_non_retryable_error(self, error_message: str) -> bool:
+        """
+        Check whether an execution error is deterministic and should not be retried.
+        """
+        raw = str(error_message or "").lower()
+
+        non_retryable_patterns = [
+            "active position exists with different side",
+            "execution profile not found",
+            "execution profile is disabled",
+            "execution_account_id is missing",
+            "unsupported trade signal type",
+        ]
+        return any(pattern in raw for pattern in non_retryable_patterns)

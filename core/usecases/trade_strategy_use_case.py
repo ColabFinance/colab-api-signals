@@ -8,6 +8,7 @@ from core.domain.entities.trade_strategy_entity import (
     TradeStrategyEntity,
     TradeStrategyParamsEntity,
 )
+from core.domain.enums.trade_enums import TradeStrategyStatus
 from core.repositories.trade_signal_repository import TradeSignalRepository
 from core.repositories.trade_strategy_repository import TradeStrategyRepository
 from core.repositories.trade_strategy_runtime_snapshot_repository import (
@@ -43,9 +44,9 @@ class TradeStrategyUseCase:
             source=str(data.source).strip().lower(),
             interval=str(data.interval).strip().lower(),
             stream_key=str(data.stream_key).strip().lower(),
-            strategy_type=str(data.strategy_type).strip().lower(),
-            status=str(data.status).strip().upper(),
-            execution_target=str(data.execution_target).strip().lower(),
+            strategy_type=data.strategy_type,
+            status=data.status,
+            execution_target=data.execution_target,
             execution_account_id=(str(data.execution_account_id).strip() if data.execution_account_id else None),
             params=TradeStrategyParamsEntity(**data.params.model_dump()),
         )
@@ -61,9 +62,11 @@ class TradeStrategyUseCase:
         """
         List strategies with optional filters.
         """
+        normalized_status = TradeStrategyStatus(str(status).strip().upper()) if status else None
+
         return await self.strategy_repo.list(
             stream_key=(str(stream_key).strip().lower() if stream_key else None),
-            status=(str(status).strip().upper() if status else None),
+            status=normalized_status.value if normalized_status else None,
             limit=int(limit),
         )
 
@@ -71,7 +74,8 @@ class TradeStrategyUseCase:
         """
         Update strategy status.
         """
-        return await self.strategy_repo.set_status(str(strategy_id), str(status).strip().upper())
+        normalized_status = TradeStrategyStatus(str(status).strip().upper())
+        return await self.strategy_repo.set_status(str(strategy_id), normalized_status.value)
 
     async def list_signals(
         self,

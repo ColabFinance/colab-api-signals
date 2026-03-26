@@ -9,6 +9,7 @@ from core.domain.entities.trade_strategy_entity import TradeStrategyEntity
 from core.domain.entities.trade_strategy_runtime_snapshot_entity import (
     TradeStrategyRuntimeSnapshotEntity,
 )
+from core.domain.enums.trade_enums import TradeSignalStatus
 from core.repositories.trade_signal_repository import TradeSignalRepository
 from core.repositories.trade_strategy_repository import TradeStrategyRepository
 from core.repositories.trade_strategy_runtime_snapshot_repository import (
@@ -28,6 +29,9 @@ class EvaluateActiveTradeStrategiesUseCase:
     For each evaluated strategy, it persists:
     - the current runtime snapshot
     - the optional emitted trade signal
+
+    The latest saved runtime snapshot is also used as the initial operational
+    state for the next evaluation so that the strategy remains stateful.
     """
 
     def __init__(
@@ -67,27 +71,32 @@ class EvaluateActiveTradeStrategiesUseCase:
         Returns:
             List of generated or reused trade signals.
         """
-        strategies = await self._strategy_repo.get_active_by_stream_key(str(stream_key).strip().lower())
+        normalized_stream_key = str(stream_key).strip().lower()
+
+        strategies = await self._strategy_repo.get_active_by_stream_key(normalized_stream_key)
         if not strategies:
             return []
 
         required_limit = self._resolve_required_limit(strategies)
         candles = await self._market_data.list_candles(
-            stream_key=str(stream_key).strip().lower(),
+            stream_key=normalized_stream_key,
             limit=int(required_limit),
         )
 
         if not candles:
-            self._logger.warning("No candles returned for stream_key=%s ts=%s", stream_key, ts)
+            self._logger.warning("No candles returned for stream_key=%s ts=%s", normalized_stream_key, ts)
             return []
 
         out: List[TradeSignalEntity] = []
 
         for strategy in strategies:
             try:
+                previous_snapshot = await self._runtime_snapshot_repo.get_latest_by_strategy_id(str(strategy.id))
+
                 result = self._strategy_service.evaluate_latest(
                     strategy=strategy,
                     candles=candles,
+                    previous_snapshot=previous_snapshot,
                 )
                 if result is None:
                     continue
@@ -104,12 +113,12 @@ class EvaluateActiveTradeStrategiesUseCase:
                 if int(signal_dict["ts"]) != int(ts):
                     continue
 
-                signal_type = str(signal_dict["signal_type"]).strip().upper()
+                signal_type = signal_dict["signal_type"]
                 idempotency_key = self._idempotency.build(
                     strategy_id=str(strategy.id),
                     stream_key=str(strategy.stream_key),
                     ts=int(signal_dict["ts"]),
-                    signal_type=signal_type,
+                    signal_type=getattr(signal_type, "value", signal_type),
                 )
 
                 signal = TradeSignalEntity(
@@ -119,19 +128,20 @@ class EvaluateActiveTradeStrategiesUseCase:
                     interval=str(strategy.interval).lower(),
                     ts=int(signal_dict["ts"]),
                     signal_type=signal_type,
-                    status="PENDING",
+                    status=TradeSignalStatus.PENDING,
                     idempotency_key=idempotency_key,
                     payload={
                         "source": str(source).strip().lower(),
-                        "event": signal_dict.get("event"),
+                        "event": getattr(signal_dict.get("event"), "value", signal_dict.get("event")),
                         "close": signal_dict.get("close"),
-                        "position_side": signal_dict.get("position_side"),
+                        "position_side": getattr(signal_dict.get("position_side"), "value", signal_dict.get("position_side")),
                         "atr": signal_dict.get("atr"),
                         "atr_pct": signal_dict.get("atr_pct"),
                         "setup_reference_price": signal_dict.get("setup_reference_price"),
-                        "strategy_type": strategy.strategy_type,
-                        "execution_target": strategy.execution_target,
+                        "strategy_type": getattr(strategy.strategy_type, "value", strategy.strategy_type),
+                        "execution_target": getattr(strategy.execution_target, "value", strategy.execution_target),
                         "execution_account_id": strategy.execution_account_id,
+                        "runtime_state": getattr(signal_dict.get("runtime_state"), "value", signal_dict.get("runtime_state")),
                     },
                 )
 
@@ -141,7 +151,7 @@ class EvaluateActiveTradeStrategiesUseCase:
                 self._logger.exception(
                     "Failed to evaluate trade strategy. strategy_id=%s stream_key=%s ts=%s err=%s",
                     getattr(strategy, "id", None),
-                    stream_key,
+                    normalized_stream_key,
                     ts,
                     exc,
                 )

@@ -5,15 +5,26 @@ from typing import Optional
 from pydantic import ConfigDict
 
 from core.domain.entities.base_entity import MongoEntity
+from core.domain.enums.trade_enums import (
+    TradeEvent,
+    TradePositionSide,
+    TradeRuntimeState,
+    TradeStrategyType,
+)
 
 
 class TradeStrategyRuntimeSnapshotEntity(MongoEntity):
     """
     Runtime snapshot for a trade strategy at a specific closed candle.
 
-    This document stores the computed state of the strategy after evaluating
-    the latest candle window. It is intended for observability, debugging,
-    dashboards, and operational inspection.
+    This document stores the computed operational state of the strategy after
+    evaluating the latest candle processing step.
+
+    It is used for:
+    - observability
+    - dashboards
+    - debugging
+    - carrying strategy state across candle evaluations
 
     One document represents one strategy evaluated at one candle close.
     """
@@ -22,7 +33,7 @@ class TradeStrategyRuntimeSnapshotEntity(MongoEntity):
     stream_key: str
     symbol: str
     interval: str
-    strategy_type: str
+    strategy_type: TradeStrategyType
 
     ts: int
     open_time: int
@@ -45,10 +56,10 @@ class TradeStrategyRuntimeSnapshotEntity(MongoEntity):
 
     setup_armed: int = 0
     setup_reference_price: Optional[float] = None
-    desired_side: Optional[str] = None
-    position_side: Optional[str] = None
+    desired_side: Optional[TradePositionSide] = None
+    position_side: Optional[TradePositionSide] = None
 
-    event: Optional[str] = None
+    event: Optional[TradeEvent] = None
 
     signal_up: int = 0
     signal_down: int = 0
@@ -56,4 +67,10 @@ class TradeStrategyRuntimeSnapshotEntity(MongoEntity):
     signal_down_first: int = 0
     exit_signal: int = 0
 
-    model_config = ConfigDict(extra="ignore")
+    runtime_state: TradeRuntimeState = TradeRuntimeState.FLAT
+    bars_since_last_event: int = 1000000
+
+    model_config = ConfigDict(
+        extra="ignore",
+        use_enum_values=True,
+    )

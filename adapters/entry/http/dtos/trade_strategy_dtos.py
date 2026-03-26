@@ -1,8 +1,18 @@
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from core.domain.enums.trade_enums import (
+    TradeAtrThresholdMode,
+    TradeExecutionTarget,
+    TradeMode,
+    TradeSignalStatus,
+    TradeSignalType,
+    TradeStrategyStatus,
+    TradeStrategyType,
+)
 
 
 class TradeStrategyParamsDTO(BaseModel):
@@ -15,11 +25,13 @@ class TradeStrategyParamsDTO(BaseModel):
     atr_window: int = Field(..., ge=1)
     atr_low_threshold: float = Field(..., gt=0)
     atr_high_threshold: float = Field(..., gt=0)
-    atr_threshold_mode: Literal["atr", "atr_pct"] = Field(default="atr_pct")
+    atr_threshold_mode: TradeAtrThresholdMode = Field(default=TradeAtrThresholdMode.ATR_PCT)
     cooloff_bars: int = Field(default=1, ge=0)
-    trade_mode: Literal["flip", "long_only", "short_only", "flat_on_down"] = Field(default="flip")
+    trade_mode: TradeMode = Field(default=TradeMode.FLIP)
     reverse_signal: bool = Field(default=False)
     allowed_weekdays: Optional[List[str]] = Field(default=None)
+
+    model_config = ConfigDict(use_enum_values=True)
 
     @field_validator("atr_high_threshold")
     @classmethod
@@ -46,13 +58,15 @@ class TradeStrategyCreateDTO(BaseModel):
     interval: str = Field(default="1m")
     stream_key: str = Field(..., min_length=1)
 
-    strategy_type: Literal["atr_two_stage"] = Field(default="atr_two_stage")
-    status: Literal["ACTIVE", "INACTIVE"] = Field(default="ACTIVE")
+    strategy_type: TradeStrategyType = Field(default=TradeStrategyType.ATR_TWO_STAGE)
+    status: TradeStrategyStatus = Field(default=TradeStrategyStatus.ACTIVE)
 
-    execution_target: Literal["api-trade-execution"] = Field(default="api-trade-execution")
+    execution_target: TradeExecutionTarget = Field(default=TradeExecutionTarget.API_TRADE_EXECUTION)
     execution_account_id: Optional[str] = None
 
     params: TradeStrategyParamsDTO
+
+    model_config = ConfigDict(use_enum_values=True)
 
     @field_validator("name", "symbol", "source", "interval", "stream_key", "execution_account_id")
     @classmethod
@@ -72,16 +86,13 @@ class TradeStrategyCreateDTO(BaseModel):
         """
         return str(v).strip().upper()
 
-    @field_validator("source", "interval", "stream_key", "status", "strategy_type", "execution_target")
+    @field_validator("source", "interval", "stream_key")
     @classmethod
     def _lower_like_fields(cls, v: str) -> str:
         """
-        Normalize lower-like fields while preserving ACTIVE/INACTIVE when needed.
+        Normalize lower-like string fields.
         """
-        raw = str(v).strip()
-        if raw in {"ACTIVE", "INACTIVE"}:
-            return raw
-        return raw.lower()
+        return str(v).strip().lower()
 
 
 class TradeStrategyStatusSetDTO(BaseModel):
@@ -90,7 +101,9 @@ class TradeStrategyStatusSetDTO(BaseModel):
     """
 
     strategy_id: str = Field(..., min_length=1)
-    status: Literal["ACTIVE", "INACTIVE"]
+    status: TradeStrategyStatus
+
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class TradeStrategyOutDTO(BaseModel):
@@ -105,10 +118,10 @@ class TradeStrategyOutDTO(BaseModel):
     interval: str
     stream_key: str
 
-    strategy_type: str
-    status: str
+    strategy_type: TradeStrategyType
+    status: TradeStrategyStatus
 
-    execution_target: str
+    execution_target: TradeExecutionTarget
     execution_account_id: Optional[str] = None
 
     params: TradeStrategyParamsDTO
@@ -117,6 +130,8 @@ class TradeStrategyOutDTO(BaseModel):
     created_at_iso: Optional[str] = None
     updated_at: Optional[int] = None
     updated_at_iso: Optional[str] = None
+
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class TradeSignalOutDTO(BaseModel):
@@ -130,9 +145,11 @@ class TradeSignalOutDTO(BaseModel):
     symbol: str
     interval: str
     ts: int
-    signal_type: str
-    status: str
+    signal_type: TradeSignalType
+    status: TradeSignalStatus
     idempotency_key: str
     payload: dict
     created_at: Optional[int] = None
     created_at_iso: Optional[str] = None
+
+    model_config = ConfigDict(use_enum_values=True)

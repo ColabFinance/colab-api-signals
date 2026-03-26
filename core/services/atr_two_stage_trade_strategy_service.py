@@ -5,6 +5,17 @@ from typing import Any, Dict, List, Optional, Sequence
 import pandas as pd
 
 from core.domain.entities.trade_strategy_entity import TradeStrategyEntity
+from core.domain.entities.trade_strategy_runtime_snapshot_entity import (
+    TradeStrategyRuntimeSnapshotEntity,
+)
+from core.domain.enums.trade_enums import (
+    TradeAtrThresholdMode,
+    TradeEvent,
+    TradeMode,
+    TradePositionSide,
+    TradeRuntimeState,
+    TradeSignalType,
+)
 from core.services.trade_indicator_calculation_service import TradeIndicatorCalculationService
 
 
@@ -23,13 +34,14 @@ WEEKDAY_PT_TO_INT = {v: k for k, v in WEEKDAY_PT.items()}
 
 class AtrTwoStageTradeStrategyService:
     """
-    Trade strategy service for ATR two-stage evaluation.
+    Stateful ATR two-stage trade strategy evaluator.
 
-    This service evaluates a full candle window and returns two outputs:
-    - a runtime snapshot for the latest candle
-    - an optional signal when the latest candle triggers an action
+    This service evaluates candles while preserving operational state across
+    executions by using the previously persisted runtime snapshot.
 
-    The runtime snapshot is persisted even when no signal is emitted.
+    The runtime snapshot always represents the current strategy state after the
+    latest processed candle, while the emitted signal represents only the action
+    triggered by the latest closed candle.
     """
 
     def __init__(self, indicator_service: Optional[TradeIndicatorCalculationService] = None):
@@ -53,16 +65,23 @@ class AtrTwoStageTradeStrategyService:
         *,
         strategy: TradeStrategyEntity,
         candles: Sequence[Dict[str, Any]],
+        previous_snapshot: Optional[TradeStrategyRuntimeSnapshotEntity] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Evaluate the strategy on a candle window.
+        Evaluate the strategy on a candle window using the previous runtime state.
+
+        Args:
+            strategy: Strategy entity being evaluated.
+            candles: Candle window in ascending or unsorted order.
+            previous_snapshot: Previously persisted runtime snapshot used as
+                the initial state for this evaluation.
 
         Returns:
             A dictionary with:
-            - runtime_snapshot: the latest computed strategy state
-            - signal: the optional signal emitted on the latest candle only
+            - runtime_snapshot: latest strategy runtime state
+            - signal: optional signal emitted on the latest processed candle
 
-            Returns None when the candle window is not usable.
+            Returns None when the candle window is unusable.
         """
         if not candles:
             return None
@@ -82,9 +101,11 @@ class AtrTwoStageTradeStrategyService:
         data["volume"] = pd.to_numeric(data["volume"], errors="coerce")
         data["open_time"] = pd.to_numeric(data["open_time"], errors="coerce")
         data["close_time"] = pd.to_numeric(data["close_time"], errors="coerce")
+
         if "trades" not in data.columns:
             data["trades"] = 0
         data["trades"] = pd.to_numeric(data["trades"], errors="coerce").fillna(0).astype(int)
+
         if "is_closed" not in data.columns:
             data["is_closed"] = True
 
@@ -106,189 +127,204 @@ class AtrTwoStageTradeStrategyService:
         data["atr"] = atr_values
         data["atr_pct"] = atr_pct_values
 
-        n = len(data)
+        if previous_snapshot is None:
+            indices_to_process = list(range(1, len(data)))
+            setup_armed = False
+            setup_reference_price: Optional[float] = None
+            position_side: Optional[TradePositionSide] = None
+            bars_since_last_event = 1000000
+        else:
+            previous_ts = int(previous_snapshot.close_time)
+            indices_to_process = [
+                int(idx)
+                for idx in data.index.tolist()
+                if int(data.loc[idx, "close_time"]) > previous_ts
+            ]
 
-        signal_up = [0] * n
-        signal_down = [0] * n
-        signal_up_first = [0] * n
-        signal_down_first = [0] * n
-        exit_signal = [0] * n
+            setup_armed = bool(previous_snapshot.setup_armed)
+            setup_reference_price = (
+                float(previous_snapshot.setup_reference_price)
+                if previous_snapshot.setup_reference_price is not None
+                else None
+            )
+            position_side = self._normalize_position_side(previous_snapshot.position_side)
+            bars_since_last_event = int(getattr(previous_snapshot, "bars_since_last_event", 1000000) or 1000000)
 
-        low_atr_hit_col = [0] * n
-        high_atr_hit_col = [0] * n
-        setup_armed_col = [0] * n
-
-        event_col: List[Optional[str]] = [None] * n
-        desired_side_col: List[Optional[str]] = [None] * n
-        position_side_col: List[Optional[str]] = [None] * n
-        setup_reference_price_col: List[Optional[float]] = [None] * n
-
-        setup_armed = False
-        setup_reference_price: Optional[float] = None
-        position_side: Optional[str] = None
-        last_event_bar = -100000
+        if not indices_to_process:
+            if previous_snapshot is None:
+                return None
+            return {
+                "runtime_snapshot": previous_snapshot.model_dump(mode="python"),
+                "signal": None,
+            }
 
         allowed_days = self._normalize_allowed_weekdays(params.allowed_weekdays)
 
-        for idx in range(1, n):
-            candle_close = float(data.loc[idx, "close"])
-            candle_ts = int(data.loc[idx, "close_time"])
+        latest_runtime_snapshot: Optional[Dict[str, Any]] = None
+        latest_signal: Optional[Dict[str, Any]] = None
 
+        for idx in indices_to_process:
+            bars_since_last_event += 1
+
+            candle_open = float(data.loc[idx, "open"])
+            candle_high = float(data.loc[idx, "high"])
+            candle_low = float(data.loc[idx, "low"])
+            candle_close = float(data.loc[idx, "close"])
+            candle_volume = float(data.loc[idx, "volume"])
+            candle_open_time = int(data.loc[idx, "open_time"])
+            candle_close_time = int(data.loc[idx, "close_time"])
+            candle_trades = int(data.loc[idx, "trades"])
+            candle_is_closed = bool(data.loc[idx, "is_closed"])
+
+            atr_now = float(data.loc[idx, "atr"])
+            atr_pct_now = float(data.loc[idx, "atr_pct"])
             atr_value_for_threshold = float(
-                data.loc[idx, "atr"] if params.atr_threshold_mode == "atr" else data.loc[idx, "atr_pct"]
+                atr_now if params.atr_threshold_mode == TradeAtrThresholdMode.ATR else atr_pct_now
             )
 
-            low_atr_hit = atr_value_for_threshold <= float(params.atr_low_threshold)
-            high_atr_hit = atr_value_for_threshold >= float(params.atr_high_threshold)
+            low_atr_hit = int(atr_value_for_threshold <= float(params.atr_low_threshold))
+            high_atr_hit = int(atr_value_for_threshold >= float(params.atr_high_threshold))
 
-            low_atr_hit_col[idx] = int(low_atr_hit)
-            high_atr_hit_col[idx] = int(high_atr_hit)
-
-            desired_side = None
+            desired_side: Optional[TradePositionSide] = None
             if setup_armed:
                 desired_side = self._resolve_desired_side(
                     current_price=candle_close,
                     reference_price=setup_reference_price,
                     reverse_signal=bool(params.reverse_signal),
-                    trade_mode=str(params.trade_mode),
+                    trade_mode=params.trade_mode,
                 )
-            desired_side_col[idx] = desired_side
 
-            can_fire = (idx - last_event_bar) > int(max(0, params.cooloff_bars))
-            is_allowed_day = self._is_allowed_day(candle_ts, allowed_days)
+            can_fire = int(bars_since_last_event) > int(max(0, params.cooloff_bars))
+            is_allowed_day = self._is_allowed_day(candle_close_time, allowed_days)
+
+            signal_up = 0
+            signal_down = 0
+            signal_up_first = 0
+            signal_down_first = 0
+            exit_signal = 0
+            event: Optional[TradeEvent] = None
+            signal_for_candle: Optional[Dict[str, Any]] = None
 
             if position_side is not None:
                 if low_atr_hit and can_fire:
-                    exit_signal[idx] = 1
-                    event_col[idx] = "ATR_LOW_EXIT"
+                    closed_side = position_side
+
+                    exit_signal = 1
+                    event = TradeEvent.ATR_LOW_EXIT
 
                     position_side = None
                     setup_armed = True
                     setup_reference_price = candle_close
-                    last_event_bar = idx
+                    bars_since_last_event = 0
+
+                    if closed_side == TradePositionSide.LONG:
+                        close_signal_type = TradeSignalType.CLOSE_LONG
+                    elif closed_side == TradePositionSide.SHORT:
+                        close_signal_type = TradeSignalType.CLOSE_SHORT
+                    else:
+                        close_signal_type = TradeSignalType.CLOSE_POSITION
+
+                    signal_for_candle = {
+                        "signal_type": close_signal_type,
+                        "ts": candle_close_time,
+                        "close": candle_close,
+                        "event": event,
+                        "position_side": closed_side,
+                        "atr": atr_now,
+                        "atr_pct": atr_pct_now,
+                        "setup_reference_price": setup_reference_price,
+                        "runtime_state": self._resolve_runtime_state(
+                            setup_armed=setup_armed,
+                            position_side=position_side,
+                        ),
+                    }
 
             else:
                 if low_atr_hit:
                     setup_armed = True
                     setup_reference_price = candle_close
-                    event_col[idx] = "ARM_ON_LOW_ATR"
+                    event = TradeEvent.ARM_ON_LOW_ATR
 
                 elif setup_armed and high_atr_hit and desired_side is not None and is_allowed_day and can_fire:
-                    if desired_side == "long":
-                        signal_up[idx] = 1
-                        signal_up_first[idx] = 1
-                        event_col[idx] = "OPEN_LONG"
-                    else:
-                        signal_down[idx] = 1
-                        signal_down_first[idx] = 1
-                        event_col[idx] = "OPEN_SHORT"
+                    opened_side = desired_side
 
-                    position_side = desired_side
+                    if opened_side == TradePositionSide.LONG:
+                        signal_up = 1
+                        signal_up_first = 1
+                        event = TradeEvent.OPEN_LONG
+                    else:
+                        signal_down = 1
+                        signal_down_first = 1
+                        event = TradeEvent.OPEN_SHORT
+
+                    position_side = opened_side
                     setup_armed = False
                     setup_reference_price = None
-                    last_event_bar = idx
+                    bars_since_last_event = 0
 
-            setup_armed_col[idx] = int(setup_armed)
-            setup_reference_price_col[idx] = setup_reference_price
-            position_side_col[idx] = position_side
+                    signal_for_candle = {
+                        "signal_type": TradeSignalType(event.value),
+                        "ts": candle_close_time,
+                        "close": candle_close,
+                        "event": event,
+                        "position_side": opened_side,
+                        "atr": atr_now,
+                        "atr_pct": atr_pct_now,
+                        "setup_reference_price": setup_reference_price,
+                        "runtime_state": self._resolve_runtime_state(
+                            setup_armed=setup_armed,
+                            position_side=position_side,
+                        ),
+                    }
 
-        last_idx = n - 1
-        last_open = float(data.loc[last_idx, "open"])
-        last_high = float(data.loc[last_idx, "high"])
-        last_low = float(data.loc[last_idx, "low"])
-        last_close = float(data.loc[last_idx, "close"])
-        last_volume = float(data.loc[last_idx, "volume"])
-        last_open_time = int(data.loc[last_idx, "open_time"])
-        last_close_time = int(data.loc[last_idx, "close_time"])
-        last_trades = int(data.loc[last_idx, "trades"])
-        last_is_closed = bool(data.loc[last_idx, "is_closed"])
-        last_atr = float(data.loc[last_idx, "atr"])
-        last_atr_pct = float(data.loc[last_idx, "atr_pct"])
-        last_atr_value_for_threshold = float(last_atr if params.atr_threshold_mode == "atr" else last_atr_pct)
+            runtime_state = self._resolve_runtime_state(
+                setup_armed=setup_armed,
+                position_side=position_side,
+            )
 
-        runtime_snapshot = {
-            "strategy_id": str(strategy.id),
-            "stream_key": str(strategy.stream_key),
-            "symbol": str(strategy.symbol).upper(),
-            "interval": str(strategy.interval).lower(),
-            "strategy_type": str(strategy.strategy_type).lower(),
-            "ts": last_close_time,
-            "open_time": last_open_time,
-            "close_time": last_close_time,
-            "open": last_open,
-            "high": last_high,
-            "low": last_low,
-            "close": last_close,
-            "volume": last_volume,
-            "trades": last_trades,
-            "is_closed": last_is_closed,
-            "atr": last_atr,
-            "atr_pct": last_atr_pct,
-            "atr_value_for_threshold": last_atr_value_for_threshold,
-            "low_atr_hit": int(low_atr_hit_col[last_idx]),
-            "high_atr_hit": int(high_atr_hit_col[last_idx]),
-            "setup_armed": int(setup_armed_col[last_idx]),
-            "setup_reference_price": (
-                float(setup_reference_price_col[last_idx])
-                if setup_reference_price_col[last_idx] is not None
-                else None
-            ),
-            "desired_side": desired_side_col[last_idx],
-            "position_side": position_side_col[last_idx],
-            "event": event_col[last_idx],
-            "signal_up": int(signal_up[last_idx]),
-            "signal_down": int(signal_down[last_idx]),
-            "signal_up_first": int(signal_up_first[last_idx]),
-            "signal_down_first": int(signal_down_first[last_idx]),
-            "exit_signal": int(exit_signal[last_idx]),
-        }
-
-        signal: Optional[Dict[str, Any]] = None
-        if runtime_snapshot["signal_up"] == 1:
-            signal = {
-                "signal_type": "OPEN_LONG",
-                "ts": runtime_snapshot["ts"],
-                "close": runtime_snapshot["close"],
-                "event": runtime_snapshot["event"],
-                "position_side": "LONG",
-                "atr": runtime_snapshot["atr"],
-                "atr_pct": runtime_snapshot["atr_pct"],
-                "setup_reference_price": runtime_snapshot["setup_reference_price"],
+            latest_runtime_snapshot = {
+                "strategy_id": str(strategy.id),
+                "stream_key": str(strategy.stream_key),
+                "symbol": str(strategy.symbol).upper(),
+                "interval": str(strategy.interval).lower(),
+                "strategy_type": strategy.strategy_type,
+                "ts": candle_close_time,
+                "open_time": candle_open_time,
+                "close_time": candle_close_time,
+                "open": candle_open,
+                "high": candle_high,
+                "low": candle_low,
+                "close": candle_close,
+                "volume": candle_volume,
+                "trades": candle_trades,
+                "is_closed": candle_is_closed,
+                "atr": atr_now,
+                "atr_pct": atr_pct_now,
+                "atr_value_for_threshold": atr_value_for_threshold,
+                "low_atr_hit": int(low_atr_hit),
+                "high_atr_hit": int(high_atr_hit),
+                "setup_armed": int(setup_armed),
+                "setup_reference_price": setup_reference_price,
+                "desired_side": desired_side,
+                "position_side": position_side,
+                "event": event,
+                "signal_up": int(signal_up),
+                "signal_down": int(signal_down),
+                "signal_up_first": int(signal_up_first),
+                "signal_down_first": int(signal_down_first),
+                "exit_signal": int(exit_signal),
+                "runtime_state": runtime_state,
+                "bars_since_last_event": int(bars_since_last_event),
             }
-        elif runtime_snapshot["signal_down"] == 1:
-            signal = {
-                "signal_type": "OPEN_SHORT",
-                "ts": runtime_snapshot["ts"],
-                "close": runtime_snapshot["close"],
-                "event": runtime_snapshot["event"],
-                "position_side": "SHORT",
-                "atr": runtime_snapshot["atr"],
-                "atr_pct": runtime_snapshot["atr_pct"],
-                "setup_reference_price": runtime_snapshot["setup_reference_price"],
-            }
-        elif runtime_snapshot["exit_signal"] == 1:
-            side = runtime_snapshot["desired_side"] or runtime_snapshot["position_side"] or "UNKNOWN"
-            if str(side).upper() == "LONG":
-                close_type = "CLOSE_LONG"
-            elif str(side).upper() == "SHORT":
-                close_type = "CLOSE_SHORT"
-            else:
-                close_type = "CLOSE_POSITION"
 
-            signal = {
-                "signal_type": close_type,
-                "ts": runtime_snapshot["ts"],
-                "close": runtime_snapshot["close"],
-                "event": runtime_snapshot["event"],
-                "position_side": str(side).upper(),
-                "atr": runtime_snapshot["atr"],
-                "atr_pct": runtime_snapshot["atr_pct"],
-                "setup_reference_price": runtime_snapshot["setup_reference_price"],
-            }
+            latest_signal = signal_for_candle
+
+        if latest_runtime_snapshot is None:
+            return None
 
         return {
-            "runtime_snapshot": runtime_snapshot,
-            "signal": signal,
+            "runtime_snapshot": latest_runtime_snapshot,
+            "signal": latest_signal,
         }
 
     def _resolve_desired_side(
@@ -297,31 +333,35 @@ class AtrTwoStageTradeStrategyService:
         current_price: float,
         reference_price: Optional[float],
         reverse_signal: bool,
-        trade_mode: str,
-    ) -> Optional[str]:
+        trade_mode: TradeMode,
+    ) -> Optional[TradePositionSide]:
         """
         Resolve the desired trade side from the setup reference price.
         """
         if reference_price is None:
             return None
 
-        desired_side: Optional[str] = None
+        desired_side: Optional[TradePositionSide] = None
         if float(current_price) > float(reference_price):
-            desired_side = "long"
+            desired_side = TradePositionSide.LONG
         elif float(current_price) < float(reference_price):
-            desired_side = "short"
+            desired_side = TradePositionSide.SHORT
 
         if desired_side is None:
             return None
 
         if reverse_signal:
-            desired_side = "short" if desired_side == "long" else "long"
+            desired_side = (
+                TradePositionSide.SHORT
+                if desired_side == TradePositionSide.LONG
+                else TradePositionSide.LONG
+            )
 
-        if desired_side == "long":
-            return "long" if trade_mode in ("flip", "long_only", "flat_on_down") else None
+        if desired_side == TradePositionSide.LONG:
+            return desired_side if trade_mode in {TradeMode.FLIP, TradeMode.LONG_ONLY, TradeMode.FLAT_ON_DOWN} else None
 
-        if desired_side == "short":
-            return "short" if trade_mode in ("flip", "short_only") else None
+        if desired_side == TradePositionSide.SHORT:
+            return desired_side if trade_mode in {TradeMode.FLIP, TradeMode.SHORT_ONLY} else None
 
         return None
 
@@ -361,3 +401,38 @@ class AtrTwoStageTradeStrategyService:
             return False
 
         return int(dt.weekday()) in allowed_days
+
+    def _normalize_position_side(self, value: Optional[TradePositionSide | str]) -> Optional[TradePositionSide]:
+        """
+        Normalize a stored position side value.
+        """
+        if value is None:
+            return None
+
+        if isinstance(value, TradePositionSide):
+            return value
+
+        raw = str(value).strip().upper()
+        if raw == TradePositionSide.LONG.value:
+            return TradePositionSide.LONG
+        if raw == TradePositionSide.SHORT.value:
+            return TradePositionSide.SHORT
+        return None
+
+    def _resolve_runtime_state(
+        self,
+        *,
+        setup_armed: bool,
+        position_side: Optional[TradePositionSide],
+    ) -> TradeRuntimeState:
+        """
+        Resolve the current operational state enum.
+        """
+        normalized_side = self._normalize_position_side(position_side)
+        if normalized_side == TradePositionSide.LONG:
+            return TradeRuntimeState.OPEN_LONG
+        if normalized_side == TradePositionSide.SHORT:
+            return TradeRuntimeState.OPEN_SHORT
+        if setup_armed:
+            return TradeRuntimeState.ARMED
+        return TradeRuntimeState.FLAT
