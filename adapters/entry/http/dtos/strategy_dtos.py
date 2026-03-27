@@ -20,7 +20,8 @@ class StrategyParamsUpsertRequest(BaseModel):
     indicator_set_id: str = Field(..., description="Use the indicator set cfg_hash")
     stream_key: Optional[str] = None
     status: str = Field("ACTIVE", examples=["ACTIVE", "INACTIVE"])
-    
+    is_public: bool = False
+
     params: StrategyParams = Field(default_factory=StrategyParams)
 
     adapter: Optional[str] = None
@@ -72,6 +73,10 @@ class StrategyParamsOut(BaseModel):
     indicator_set_id: str
     params: Optional[StrategyParams] = None
 
+    alias: Optional[str] = None
+    dex: Optional[str] = None
+    is_public: bool = False
+
     chain: Optional[str] = None
     owner: Optional[str] = None
     strategy_id: Optional[int] = None
@@ -93,12 +98,13 @@ class StrategyRegisterRequest(BaseModel):
     strategy_id: int = Field(..., ge=1)
 
     name: str = Field(..., examples=["pancake-weth4"])
-
     symbol: str = Field(..., examples=["ETHUSDT"])
     indicator_set_id: str = Field(..., description="Use the indicator set cfg_hash")
     stream_key: Optional[str] = None
-    
+
     status: str = Field("INACTIVE", examples=["ACTIVE", "INACTIVE"])
+    is_public: bool = False
+
     adapter: Optional[str] = None
     dex_router: Optional[str] = None
     token0: Optional[str] = None
@@ -120,7 +126,7 @@ class StrategyRegisterRequest(BaseModel):
         if not v:
             raise ValueError("indicator_set_id is required")
         return v
-    
+
     @field_validator("owner")
     @classmethod
     def validate_owner(cls, v: str) -> str:
@@ -159,6 +165,7 @@ class StrategyRegisterRequest(BaseModel):
 class StrategyExistsResponse(BaseModel):
     exists: bool = Field(..., examples=[True, False])
 
+
 class StrategyExistsQuery(BaseModel):
     chain: ChainKey
     owner: str
@@ -185,7 +192,7 @@ class StrategyExistsQuery(BaseModel):
         if not v:
             raise ValueError("name is required")
         return v
-    
+
 
 class StrategyListQuery(BaseModel):
     chain: ChainKey
@@ -209,7 +216,24 @@ class StrategyListQuery(BaseModel):
         if not vv:
             return None
         return "ACTIVE" if vv == "ACTIVE" else "INACTIVE"
-    
+
+
+class StrategyExploreQuery(BaseModel):
+    chain: Optional[ChainKey] = None
+    status: Optional[str] = None
+    limit: int = Field(200, ge=1, le=1000)
+    offset: int = Field(0, ge=0)
+
+    @field_validator("status")
+    @classmethod
+    def norm_status(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        vv = (v or "").strip().upper()
+        if not vv:
+            return None
+        return "ACTIVE" if vv == "ACTIVE" else "INACTIVE"
+
 
 class StrategyVaultLinkRequest(BaseModel):
     chain: ChainKey
@@ -242,7 +266,7 @@ class StrategyVaultLinkRequest(BaseModel):
         if not v:
             raise ValueError("alias is required")
         return v
-    
+
 
 class StrategyStatusSetRequest(BaseModel):
     chain: ChainKey

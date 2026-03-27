@@ -40,6 +40,11 @@ class StrategyRepositoryMongoDB(StrategyRepository):
                 "strategy_id": {"$exists": True},
             },
         )
+        
+        await self._col.create_index(
+            [("chain", 1), ("status", 1), ("is_public", 1), ("updated_at", -1)],
+            name="idx_strategy_public_explore",
+        )
 
     def _now(self) -> tuple[int, str]:
         now_ms = int(time.time() * 1000)
@@ -129,3 +134,28 @@ class StrategyRepositoryMongoDB(StrategyRepository):
         cursor = self._col.find(q).sort([("strategy_id", 1), ("created_at", 1)])
         docs = await cursor.to_list(length=None)
         return [StrategyEntity.from_mongo(d) for d in docs if d]
+    
+    async def list_public(
+        self,
+        *,
+        chain: str | None = None,
+        status: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> List[StrategyEntity]:
+        query: dict = {"is_public": True}
+
+        if chain:
+            query["chain"] = chain
+        if status:
+            query["status"] = status
+
+        cursor = (
+            self._col.find(query)
+            .sort([("updated_at", -1), ("created_at", -1)])
+            .skip(int(offset))
+            .limit(int(limit))
+        )
+
+        docs = await cursor.to_list(length=int(limit))
+        return [StrategyEntity.from_mongo(doc) for doc in docs if doc]

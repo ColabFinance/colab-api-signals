@@ -5,7 +5,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from adapters.entry.http.deps import get_db
-from adapters.entry.http.dtos.strategy_dtos import StrategyExistsQuery, StrategyExistsResponse, StrategyListQuery, StrategyParamsUpsertRequest, StrategyParamsOut, StrategyRegisterRequest, StrategyStatusSetRequest, StrategyVaultLinkRequest
+from adapters.entry.http.dtos.strategy_dtos import (
+    StrategyExistsQuery,
+    StrategyExistsResponse,
+    StrategyExploreQuery,
+    StrategyListQuery,
+    StrategyParamsOut,
+    StrategyParamsUpsertRequest,
+    StrategyRegisterRequest,
+    StrategyStatusSetRequest,
+    StrategyVaultLinkRequest,
+)
 from adapters.entry.http.auth.user_auth import require_user, UserPrincipal
 
 from adapters.external.database.strategy_repository_mongodb import StrategyRepositoryMongoDB
@@ -20,6 +30,34 @@ def get_use_case(db: AsyncIOMotorDatabase) -> StrategyParamsUseCase:
     return StrategyParamsUseCase(repo=repo)
 
 
+@router.get("/explore", response_model=dict)
+async def explore_public_strategies(
+    chain: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    try:
+        q = StrategyExploreQuery(chain=chain, status=status, limit=limit, offset=offset)
+
+        uc = get_use_case(db)
+        await uc.ensure_indexes()
+
+        ents = await uc.list_public(
+            chain=q.chain,
+            status=q.status,
+            limit=q.limit,
+            offset=q.offset,
+        )
+        data = [StrategyParamsOut.model_validate(e.model_dump()) for e in (ents or [])]
+        return {"ok": True, "message": "ok", "data": data}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to explore strategies: {exc}") from exc
+
+
 @router.get("/params", response_model=dict)
 async def get_strategy_params(
     chain: str = Query(...),
@@ -29,7 +67,6 @@ async def get_strategy_params(
     user: UserPrincipal = Depends(require_user),
 ):
     try:
-        # Authorization: user can only read their own owner doc
         if (owner or "").strip().lower() != user.wallet_address:
             raise HTTPException(status_code=403, detail="Not authorized for this owner address.")
 
@@ -54,7 +91,6 @@ async def upsert_strategy_params(
     user: UserPrincipal = Depends(require_user),
 ):
     try:
-        # Authorization: user can only upsert their own owner doc
         if (body.owner or "").strip().lower() != user.wallet_address:
             raise HTTPException(status_code=403, detail="Not authorized for this owner address.")
 
@@ -96,7 +132,8 @@ async def register_strategy(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to register strategy: {exc}") from exc
-    
+
+
 @router.get("/exists", response_model=dict)
 async def strategy_exists(
     chain: str = Query(...),
@@ -155,7 +192,7 @@ async def list_strategies(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list strategies: {exc}") from exc
-    
+
 
 @router.post("/vault-link", response_model=dict)
 async def link_vault_to_strategy(

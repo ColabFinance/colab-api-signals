@@ -1,17 +1,17 @@
-"""
-Application configuration for api-signals.
-
-Centralizes environment variables using python-dotenv.
-"""
+from __future__ import annotations
 
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
 class Settings:
-    # MongoDB
+    """
+    Application configuration for api-signals.
+    """
+
     MONGODB_URI: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
     MONGODB_DB_NAME: str = os.getenv("MONGODB_DB_NAME", "signals_db")
     MONGODB_MAX_POOL_SIZE: int = int(os.getenv("MONGODB_MAX_POOL_SIZE", "50"))
@@ -24,20 +24,18 @@ class Settings:
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
-    # External APIs
     MARKET_DATA_BASE_URL: str = os.getenv("MARKET_DATA_BASE_URL", "http://172.17.0.1:8081")
     LP_BASE_URL: str = os.getenv("LP_BASE_URL", "http://172.17.0.1:8000")
+    TRADE_EXECUTION_BASE_URL: str = os.getenv("TRADE_EXECUTION_BASE_URL", "http://172.17.0.1:8002")
 
-    # Backfill behavior
     ENABLE_BACKFILL_ON_START: bool = os.getenv("ENABLE_BACKFILL_ON_START", "true").lower() == "true"
 
-    # Log / app
     APP_NAME: str = os.getenv("APP_NAME", "api-signals")
 
-    # Admin / Privy Auth
     PRIVY_APP_ID: str = os.getenv("PRIVY_APP_ID", "")
     PRIVY_JWKS_URL: str = os.getenv("PRIVY_JWKS_URL", "https://auth.privy.io/api/v1/apps/jwks")
     ADMIN_WALLETS: str = os.getenv("ADMIN_WALLETS", "")
     PRIVY_APP_SECRET: str = os.getenv("PRIVY_APP_SECRET", "")
-    
+
+
 settings = Settings()

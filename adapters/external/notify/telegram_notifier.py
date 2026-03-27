@@ -1,42 +1,73 @@
-import httpx
-import logging
+from __future__ import annotations
+
+from telegram import Bot
+from telegram.constants import ParseMode
+
 
 class TelegramNotifier:
-    def __init__(self, bot_token: str, chat_id: str | int, logger: logging.Logger | None = None):
-        self.bot_token = bot_token
-        self.chat_id = chat_id
-        self._logger = logger or logging.getLogger(self.__class__.__name__)
-        self._client = httpx.AsyncClient(timeout=10.0)
+    """
+    Telegram notifier used by api-signals.
+
+    This notifier supports both text messages and photo uploads and applies
+    Markdown parsing so execution reports keep the intended formatting.
+    """
+
+    def __init__(self, *, bot_token: str, chat_id: str) -> None:
+        """
+        Initialize the notifier.
+
+        Args:
+            bot_token: Telegram bot token.
+            chat_id: Target chat identifier.
+        """
+        self._bot = Bot(token=str(bot_token))
+        self._chat_id = str(chat_id)
 
     async def send_message(self, text: str) -> None:
-        if not text:
-            return
+        """
+        Send one Telegram text message.
 
-        # 1) Trunca mensagem pra não estourar limite do Telegram
-        MAX_LEN = 3800  # 4096 é o hard limit
-        if len(text) > MAX_LEN:
-            text = text[:MAX_LEN - 50] + "\n\n[... mensagem truncada ...]"
-
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        payload = {
-            "chat_id": self.chat_id,
-            "text": text,
-            # MELHOR: sem parse_mode no começo, pra descartar erros de Markdown.
-            # "parse_mode": "MarkdownV2",
-        }
-
-        resp = await self._client.post(url, json=payload)
-        if resp.status_code >= 400:
-            # Tenta extrair o erro real do Telegram
+        It first tries Markdown formatting. If Telegram rejects the message
+        because of parsing issues, it retries using plain text so the alert
+        is still delivered.
+        """
+        async with self._bot:
             try:
-                data = resp.json()
+                await self._bot.send_message(
+                    chat_id=self._chat_id,
+                    text=text,
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_web_page_preview=True,
+                )
             except Exception:
-                data = {"raw": resp.text}
+                await self._bot.send_message(
+                    chat_id=self._chat_id,
+                    text=text,
+                    disable_web_page_preview=True,
+                )
 
-            self._logger.error(
-                "Telegram error %s: %s",
-                resp.status_code,
-                data,
-            )
-            # Não levanta exceção aqui pra não matar a pipeline
-            return
+    async def send_photo(self, photo_path: str, caption: str | None = None) -> None:
+        """
+        Send one Telegram photo.
+
+        Caption is sent without markdown parsing to avoid Telegram entity
+        parsing errors for values like OPEN_LONG, CLOSE_SHORT, stream keys,
+        ids, and other runtime strings containing underscores.
+
+        If Telegram rejects the caption for any reason, the photo is retried
+        without caption so the chart is still delivered.
+        """
+        async with self._bot:
+            with open(photo_path, "rb") as photo:
+                try:
+                    await self._bot.send_photo(
+                        chat_id=self._chat_id,
+                        photo=photo,
+                        caption=caption,
+                    )
+                except Exception:
+                    photo.seek(0)
+                    await self._bot.send_photo(
+                        chat_id=self._chat_id,
+                        photo=photo,
+                    )

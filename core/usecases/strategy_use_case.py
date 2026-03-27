@@ -24,7 +24,11 @@ class StrategyParamsUseCase:
         await self.repo.ensure_indexes()
 
     async def get_by_onchain_identity(self, *, chain: str, owner: str, strategy_id: int) -> Optional[StrategyEntity]:
-        return await self.repo.get_by_onchain_identity(chain=_lower(chain), owner=_lower(owner), strategy_id=int(strategy_id))
+        return await self.repo.get_by_onchain_identity(
+            chain=_lower(chain),
+            owner=_lower(owner),
+            strategy_id=int(strategy_id),
+        )
 
     async def upsert_params(self, *, data: StrategyParamsUpsertRequest) -> StrategyEntity:
         """
@@ -49,7 +53,7 @@ class StrategyParamsUseCase:
         indicator_set_id = _norm(data.indicator_set_id)
         stream_key = _norm(data.stream_key)
         status = _norm(data.status) or "ACTIVE"
-        
+
         params_obj: StrategyParams = data.params or StrategyParams()
 
         if not name:
@@ -66,6 +70,7 @@ class StrategyParamsUseCase:
             indicator_set_id=indicator_set_id,
             stream_key=stream_key,
             params=params_obj,
+            is_public=bool(data.is_public),
 
             chain=chain,
             owner=owner,
@@ -116,7 +121,8 @@ class StrategyParamsUseCase:
             indicator_set_id=indicator_set_id,
             stream_key=stream_key,
             status=status,
-            params=StrategyParams(),  # init
+            params=StrategyParams(),
+            is_public=bool(data.is_public),
 
             chain=chain,
             owner=owner,
@@ -138,7 +144,7 @@ class StrategyParamsUseCase:
         if not symbol:
             raise ValueError("symbol is required")
         return await self.repo.exists_by_name_symbol(name, symbol)
-    
+
     async def list_by_owner_chain(self, *, chain: str, owner: str, status: Optional[str] = None) -> List[StrategyEntity]:
         chain = _lower(chain)
         owner = _lower(owner)
@@ -156,6 +162,30 @@ class StrategyParamsUseCase:
             raise ValueError("owner is required")
 
         return await self.repo.list_by_owner_chain(chain=chain, owner=owner, status=st)
+
+    async def list_public(
+        self,
+        *,
+        chain: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> List[StrategyEntity]:
+        chain_n = _lower(chain) if chain else None
+
+        st = _norm(status)
+        if st:
+            st = st.upper()
+            st = "ACTIVE" if st == "ACTIVE" else "INACTIVE"
+        else:
+            st = None
+
+        return await self.repo.list_public(
+            chain=chain_n,
+            status=st,
+            limit=int(limit),
+            offset=int(offset),
+        )
 
     async def update_vault_link(self, *, chain: str, owner: str, strategy_id: int, dex: str, alias: str) -> StrategyEntity:
         """
@@ -194,7 +224,7 @@ class StrategyParamsUseCase:
 
         ent = StrategyEntity(**data)
         return await self.repo.upsert_by_onchain_identity(ent)
-    
+
     async def set_status(self, *, chain: str, owner: str, strategy_id: int, status: str) -> StrategyEntity:
         chain_n = _lower(chain)
         owner_n = _lower(owner)
@@ -219,4 +249,3 @@ class StrategyParamsUseCase:
 
         ent = StrategyEntity(**data)
         return await self.repo.upsert_by_onchain_identity(ent)
-    
