@@ -183,6 +183,8 @@ class ExecuteTradeSignalPipelineUseCase:
             runtime_error = str(exc)
             self._logger.warning("Failed to load runtime snapshot for success notification: %s", exc)
 
+        signal_type = self._normalize_signal_type(signal.signal_type)
+
         lines = [
             "✅ *Trade signal executado*",
             f"• Strategy ID: `{signal.strategy_id}`",
@@ -191,6 +193,13 @@ class ExecuteTradeSignalPipelineUseCase:
             f"• Timestamp: `{signal.ts}`",
             f"• Execução: `{response.get('reason') or ('executed' if response.get('executed') else 'no-op')}`",
         ]
+
+        execution_lines = self._build_execution_lines(
+            signal_type=signal_type,
+            response=response,
+        )
+        if execution_lines:
+            lines.extend([""] + execution_lines)
 
         if runtime is not None:
             lines.extend(
@@ -336,6 +345,99 @@ class ExecuteTradeSignalPipelineUseCase:
 
         return path
 
+    def _build_execution_lines(
+        self,
+        *,
+        signal_type: TradeSignalType,
+        response: dict,
+    ) -> list[str]:
+        """
+        Build execution details for Telegram using the returned position payload.
+
+        This uses only data already available today in the api-trade-execution
+        response. PnL and price movement are derived locally here.
+        """
+        position = response.get("position")
+        if not isinstance(position, dict) or not position:
+            return []
+
+        symbol = position.get("symbol")
+        side = self._enum_value(position.get("position_side"))
+        quantity = self._safe_float(position.get("quantity"))
+        entry_price = self._safe_float(position.get("entry_price"))
+        exit_price = self._safe_float(position.get("exit_price"))
+        opened_at_iso = position.get("opened_at_iso")
+        closed_at_iso = position.get("closed_at_iso")
+        opened_at = self._safe_int(position.get("opened_at"))
+        closed_at = self._safe_int(position.get("closed_at"))
+
+        bars_held: Optional[int] = None
+        if opened_at is not None and closed_at is not None and closed_at >= opened_at:
+            bars_held = int((closed_at - opened_at) // 60_000)
+
+        gross_pnl_usd: Optional[float] = None
+        pnl_pct: Optional[float] = None
+        price_pct: Optional[float] = None
+
+        if (
+            entry_price is not None
+            and exit_price is not None
+            and quantity is not None
+            and quantity > 0
+            and side in {"LONG", "SHORT"}
+            and entry_price > 0
+        ):
+            if side == "LONG":
+                gross_pnl_usd = (exit_price - entry_price) * quantity
+                price_pct = ((exit_price - entry_price) / entry_price) * 100.0
+            else:
+                gross_pnl_usd = (entry_price - exit_price) * quantity
+                price_pct = ((entry_price - exit_price) / entry_price) * 100.0
+
+            entry_notional = entry_price * quantity
+            if entry_notional > 0:
+                pnl_pct = (gross_pnl_usd / entry_notional) * 100.0
+
+        if signal_type in {TradeSignalType.OPEN_LONG, TradeSignalType.OPEN_SHORT}:
+            lines = ["*Execução da abertura*"]
+            if symbol is not None:
+                lines.append(f"• Symbol: `{symbol}`")
+            if side is not None:
+                lines.append(f"• Side aberto: `{side}`")
+            if entry_price is not None:
+                lines.append(f"• Entry price: `{self._fmt_float(entry_price)}`")
+            if quantity is not None:
+                lines.append(f"• Quantity: `{self._fmt_float(quantity)}`")
+            if opened_at_iso is not None:
+                lines.append(f"• Opened at: `{opened_at_iso}`")
+            return lines
+
+        lines = ["*Execução do fechamento*"]
+        if symbol is not None:
+            lines.append(f"• Symbol: `{symbol}`")
+        if side is not None:
+            lines.append(f"• Side fechado: `{side}`")
+        if entry_price is not None:
+            lines.append(f"• Entry price: `{self._fmt_float(entry_price)}`")
+        if exit_price is not None:
+            lines.append(f"• Exit price: `{self._fmt_float(exit_price)}`")
+        if quantity is not None:
+            lines.append(f"• Quantity: `{self._fmt_float(quantity)}`")
+        if gross_pnl_usd is not None:
+            lines.append(f"• Gross PnL USD: `{self._fmt_float(gross_pnl_usd)}`")
+        if pnl_pct is not None:
+            lines.append(f"• PnL %: `{self._fmt_float(pnl_pct)}%`")
+        if price_pct is not None:
+            lines.append(f"• Price %: `{self._fmt_float(price_pct)}%`")
+        if opened_at_iso is not None:
+            lines.append(f"• Opened at: `{opened_at_iso}`")
+        if closed_at_iso is not None:
+            lines.append(f"• Closed at: `{closed_at_iso}`")
+        if bars_held is not None:
+            lines.append(f"• Bars held: `{bars_held}`")
+
+        return lines
+
     def _build_lock_key(self, signal: TradeSignalEntity) -> str:
         """
         Build the per-symbol/account lock key.
@@ -387,3 +489,31 @@ class ExecuteTradeSignalPipelineUseCase:
         Return enum value when the object is an enum, otherwise return it unchanged.
         """
         return value.value if hasattr(value, "value") else value
+
+    def _safe_float(self, value: Any) -> Optional[float]:
+        """
+        Safely coerce a value to float.
+        """
+        try:
+            if value is None or value == "":
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    def _safe_int(self, value: Any) -> Optional[int]:
+        """
+        Safely coerce a value to int.
+        """
+        try:
+            if value is None or value == "":
+                return None
+            return int(value)
+        except Exception:
+            return None
+
+    def _fmt_float(self, value: float) -> str:
+        """
+        Format floats for Telegram output.
+        """
+        return f"{float(value):.8f}".rstrip("0").rstrip(".")
