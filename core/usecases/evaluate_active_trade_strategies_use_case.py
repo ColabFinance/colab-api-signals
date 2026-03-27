@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from adapters.external.market_data.market_data_http_client import MarketDataHttpClient
 from core.domain.entities.trade_signal_entity import TradeSignalEntity
@@ -9,7 +9,7 @@ from core.domain.entities.trade_strategy_entity import TradeStrategyEntity
 from core.domain.entities.trade_strategy_runtime_snapshot_entity import (
     TradeStrategyRuntimeSnapshotEntity,
 )
-from core.domain.enums.trade_enums import TradeSignalStatus
+from core.domain.enums.trade_enums import TradeSignalStatus, TradeSignalType
 from core.repositories.trade_signal_repository import TradeSignalRepository
 from core.repositories.trade_strategy_repository import TradeStrategyRepository
 from core.repositories.trade_strategy_runtime_snapshot_repository import (
@@ -113,12 +113,12 @@ class EvaluateActiveTradeStrategiesUseCase:
                 if int(signal_dict["ts"]) != int(ts):
                     continue
 
-                signal_type = signal_dict["signal_type"]
+                signal_type = self._normalize_signal_type(signal_dict.get("signal_type"))
                 idempotency_key = self._idempotency.build(
                     strategy_id=str(strategy.id),
                     stream_key=str(strategy.stream_key),
                     ts=int(signal_dict["ts"]),
-                    signal_type=getattr(signal_type, "value", signal_type),
+                    signal_type=signal_type.value,
                 )
 
                 signal = TradeSignalEntity(
@@ -132,16 +132,16 @@ class EvaluateActiveTradeStrategiesUseCase:
                     idempotency_key=idempotency_key,
                     payload={
                         "source": str(source).strip().lower(),
-                        "event": getattr(signal_dict.get("event"), "value", signal_dict.get("event")),
+                        "event": self._enum_value(signal_dict.get("event")),
                         "close": signal_dict.get("close"),
-                        "position_side": getattr(signal_dict.get("position_side"), "value", signal_dict.get("position_side")),
+                        "position_side": self._enum_value(signal_dict.get("position_side")),
                         "atr": signal_dict.get("atr"),
                         "atr_pct": signal_dict.get("atr_pct"),
                         "setup_reference_price": signal_dict.get("setup_reference_price"),
-                        "strategy_type": getattr(strategy.strategy_type, "value", strategy.strategy_type),
-                        "execution_target": getattr(strategy.execution_target, "value", strategy.execution_target),
+                        "strategy_type": self._enum_value(strategy.strategy_type),
+                        "execution_target": self._enum_value(strategy.execution_target),
                         "execution_account_id": strategy.execution_account_id,
-                        "runtime_state": getattr(signal_dict.get("runtime_state"), "value", signal_dict.get("runtime_state")),
+                        "runtime_state": self._enum_value(signal_dict.get("runtime_state")),
                     },
                 )
 
@@ -170,3 +170,11 @@ class EvaluateActiveTradeStrategiesUseCase:
             max_need = max(max_need, int(self._strategy_service.required_bars(strategy)))
 
         return max(50, int(max_need))
+
+    def _normalize_signal_type(self, value: Any) -> TradeSignalType:
+        if isinstance(value, TradeSignalType):
+            return value
+        return TradeSignalType(str(value).strip().upper())
+
+    def _enum_value(self, value: Any) -> Any:
+        return value.value if hasattr(value, "value") else value

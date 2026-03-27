@@ -34,5 +34,4 @@ class TradeSignalEntity(MongoEntity):
 
     model_config = ConfigDict(
         extra="ignore",
-        use_enum_values=True,
     )

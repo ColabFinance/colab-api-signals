@@ -7,23 +7,18 @@ from typing import List, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from core.domain.entities.trade_strategy_entity import TradeStrategyEntity
+from core.domain.enums.trade_enums import TradeStrategyStatus
 from core.repositories.trade_strategy_repository import TradeStrategyRepository
 
 
 class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
     """
     MongoDB repository for trade strategies.
-
-    Trade strategies are stored separately from LP strategies to keep both
-    evaluation pipelines isolated.
     """
 
     COLLECTION = "trade_strategies"
 
     def __init__(self, db: AsyncIOMotorDatabase):
-        """
-        Initialize the repository with a MongoDB database handle.
-        """
         self._col = db[self.COLLECTION]
 
     async def ensure_indexes(self) -> None:
@@ -41,6 +36,13 @@ class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
         now_ms = int(time.time() * 1000)
         now_iso = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
         return now_ms, now_iso
+
+    def _normalize_status(self, status: TradeStrategyStatus | str | None) -> Optional[str]:
+        if status is None:
+            return None
+        if isinstance(status, TradeStrategyStatus):
+            return status.value
+        return TradeStrategyStatus(str(status).strip().upper()).value
 
     async def create(self, strategy: TradeStrategyEntity) -> TradeStrategyEntity:
         """
@@ -87,7 +89,7 @@ class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
         if stream_key:
             query["stream_key"] = str(stream_key).strip().lower()
         if status:
-            query["status"] = str(status).strip().upper()
+            query["status"] = self._normalize_status(status)
 
         cursor = self._col.find(query).sort([("updated_at", -1), ("created_at", -1)]).limit(int(limit))
         docs = await cursor.to_list(length=int(limit))
@@ -100,7 +102,7 @@ class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
         cursor = self._col.find(
             {
                 "stream_key": str(stream_key).strip().lower(),
-                "status": "ACTIVE",
+                "status": TradeStrategyStatus.ACTIVE.value,
             }
         )
         docs = await cursor.to_list(length=None)
@@ -111,11 +113,11 @@ class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
         Update strategy status and return the updated document.
         """
         now_ms, now_iso = self._now()
+        normalized_status = self._normalize_status(status)
 
-        updated = None
         await self._col.update_one(
             {"_id": strategy_id},
-            {"$set": {"status": str(status).strip().upper(), "updated_at": now_ms, "updated_at_iso": now_iso}},
+            {"$set": {"status": normalized_status, "updated_at": now_ms, "updated_at_iso": now_iso}},
         )
         updated = await self.get_by_id(strategy_id)
         if updated is not None:
@@ -125,7 +127,7 @@ class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
             from bson import ObjectId
             await self._col.update_one(
                 {"_id": ObjectId(strategy_id)},
-                {"$set": {"status": str(status).strip().upper(), "updated_at": now_ms, "updated_at_iso": now_iso}},
+                {"$set": {"status": normalized_status, "updated_at": now_ms, "updated_at_iso": now_iso}},
             )
             return await self.get_by_id(strategy_id)
         except Exception:

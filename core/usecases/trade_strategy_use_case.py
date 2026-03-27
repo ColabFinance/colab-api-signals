@@ -27,17 +27,11 @@ class TradeStrategyUseCase:
     runtime_snapshot_repo: TradeStrategyRuntimeSnapshotRepository
 
     async def ensure_indexes(self) -> None:
-        """
-        Ensure indexes required by repositories.
-        """
         await self.strategy_repo.ensure_indexes()
         await self.signal_repo.ensure_indexes()
         await self.runtime_snapshot_repo.ensure_indexes()
 
     async def create_strategy(self, data: TradeStrategyCreateDTO) -> TradeStrategyEntity:
-        """
-        Create a new trade strategy from the request DTO.
-        """
         ent = TradeStrategyEntity(
             name=str(data.name).strip(),
             symbol=str(data.symbol).strip().upper(),
@@ -48,7 +42,7 @@ class TradeStrategyUseCase:
             status=data.status,
             execution_target=data.execution_target,
             execution_account_id=(str(data.execution_account_id).strip() if data.execution_account_id else None),
-            params=TradeStrategyParamsEntity(**data.params.model_dump()),
+            params=TradeStrategyParamsEntity(**data.params.model_dump(mode="python")),
         )
         return await self.strategy_repo.create(ent)
 
@@ -59,9 +53,6 @@ class TradeStrategyUseCase:
         status: Optional[str] = None,
         limit: int = 500,
     ) -> List[TradeStrategyEntity]:
-        """
-        List strategies with optional filters.
-        """
         normalized_status = TradeStrategyStatus(str(status).strip().upper()) if status else None
 
         return await self.strategy_repo.list(
@@ -71,9 +62,6 @@ class TradeStrategyUseCase:
         )
 
     async def set_status(self, *, strategy_id: str, status: str) -> Optional[TradeStrategyEntity]:
-        """
-        Update strategy status.
-        """
         normalized_status = TradeStrategyStatus(str(status).strip().upper())
         return await self.strategy_repo.set_status(str(strategy_id), normalized_status.value)
 
@@ -83,9 +71,6 @@ class TradeStrategyUseCase:
         strategy_id: Optional[str] = None,
         limit: int = 200,
     ):
-        """
-        List generated trade signals.
-        """
         return await self.signal_repo.list(strategy_id=strategy_id, limit=int(limit))
 
     async def get_latest_runtime_snapshot(self, *, strategy_id: str):

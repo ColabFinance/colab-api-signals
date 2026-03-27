@@ -32,8 +32,7 @@ class TradeStrategyParamsEntity(BaseModel):
     allowed_weekdays: Optional[List[str]] = None
 
     model_config = ConfigDict(
-        extra="ignore",
-        use_enum_values=True,
+        extra="ignore"
     )
 
 
@@ -60,6 +59,5 @@ class TradeStrategyEntity(MongoEntity):
     params: TradeStrategyParamsEntity = Field(...)
 
     model_config = ConfigDict(
-        extra="ignore",
-        use_enum_values=True,
+        extra="ignore"
     )

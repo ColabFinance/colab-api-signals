@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import tempfile
-from typing import Optional
+from typing import Any, Optional
 
 import matplotlib.pyplot as plt
 import mplfinance as mpf
@@ -24,13 +24,6 @@ from core.repositories.trade_strategy_runtime_snapshot_repository import (
 class ExecuteTradeSignalPipelineUseCase:
     """
     Consume pending trade signals and execute them through api-trade-execution.
-
-    Rules:
-    - OPEN_LONG and OPEN_SHORT call the open endpoint.
-    - CLOSE_LONG, CLOSE_SHORT, and CLOSE_POSITION call the close endpoint.
-    - Each signal is processed with retries and per-symbol locking.
-    - Success and failure are both reported to Telegram.
-    - Success notifications include a generated candlestick chart image.
     """
 
     def __init__(
@@ -139,7 +132,7 @@ class ExecuteTradeSignalPipelineUseCase:
         """
         Dispatch one trade signal to the appropriate api-trade-execution endpoint.
         """
-        signal_type = signal.signal_type
+        signal_type = self._normalize_signal_type(signal.signal_type)
 
         if signal_type in {TradeSignalType.OPEN_LONG, TradeSignalType.OPEN_SHORT}:
             position_side = "LONG" if signal_type == TradeSignalType.OPEN_LONG else "SHORT"
@@ -173,59 +166,102 @@ class ExecuteTradeSignalPipelineUseCase:
 
     async def _notify_success(self, signal: TradeSignalEntity, response: dict) -> None:
         """
-        Send a success Telegram notification with chart and runtime state.
+        Send a success Telegram notification.
 
-        Notification failures are logged but never change the execution result.
+        The success text is always attempted first.
+        Chart generation and chart upload are isolated so they can never
+        suppress the main success message.
         """
         if self._notifier is None:
             return
 
+        runtime = None
+        runtime_error: Optional[str] = None
         try:
             runtime = await self._runtime_snapshot_repo.get_latest_by_strategy_id(str(signal.strategy_id))
+        except Exception as exc:
+            runtime_error = str(exc)
+            self._logger.warning("Failed to load runtime snapshot for success notification: %s", exc)
+
+        lines = [
+            "✅ *Trade signal executado*",
+            f"• Strategy ID: `{signal.strategy_id}`",
+            f"• Symbol: `{signal.symbol}`",
+            f"• Tipo: `{self._enum_value(signal.signal_type)}`",
+            f"• Timestamp: `{signal.ts}`",
+            f"• Execução: `{response.get('reason') or ('executed' if response.get('executed') else 'no-op')}`",
+        ]
+
+        if runtime is not None:
+            lines.extend(
+                [
+                    "",
+                    "*Runtime atual da estratégia*",
+                    f"• STATE: `{self._enum_value(getattr(runtime, 'runtime_state', None))}`",
+                    f"• ATR: `{runtime.atr}`",
+                    f"• ATR_PCT: `{runtime.atr_pct}`",
+                    f"• LOW_ATR_HIT: `{runtime.low_atr_hit}`",
+                    f"• HIGH_ATR_HIT: `{runtime.high_atr_hit}`",
+                    f"• SETUP_ARMED: `{runtime.setup_armed}`",
+                    f"• SETUP_REFERENCE_PRICE: `{runtime.setup_reference_price}`",
+                    f"• DESIRED_SIDE: `{self._enum_value(runtime.desired_side)}`",
+                    f"• POSITION_SIDE: `{self._enum_value(runtime.position_side)}`",
+                    f"• EVENT: `{self._enum_value(runtime.event)}`",
+                    f"• BARS_SINCE_LAST_EVENT: `{getattr(runtime, 'bars_since_last_event', None)}`",
+                    f"• CLOSE: `{runtime.close}`",
+                ]
+            )
+        elif runtime_error:
+            lines.extend(
+                [
+                    "",
+                    "*Runtime atual da estratégia*",
+                    f"• Runtime indisponível: `{runtime_error}`",
+                ]
+            )
+
+        await self._send_text_safe("\n".join(lines))
+
+        chart_path: Optional[str] = None
+        try:
             chart_path = await self._build_chart_image(signal.stream_key)
-
-            lines = [
-                "✅ *Trade signal executado*",
-                f"• Strategy ID: `{signal.strategy_id}`",
-                f"• Symbol: `{signal.symbol}`",
-                f"• Tipo: `{signal.signal_type}`",
-                f"• Timestamp: `{signal.ts}`",
-                f"• Execução: `{response.get('reason') or ('executed' if response.get('executed') else 'no-op')}`",
-            ]
-
-            if runtime is not None:
-                lines.extend(
+        except Exception as exc:
+            self._logger.warning("Trade chart generation failed: %s", exc)
+            await self._send_text_safe(
+                "\n".join(
                     [
-                        "",
-                        "*Runtime atual da estratégia*",
-                        f"• STATE: `{getattr(runtime, 'runtime_state', None)}`",
-                        f"• ATR: `{runtime.atr}`",
-                        f"• ATR_PCT: `{runtime.atr_pct}`",
-                        f"• LOW_ATR_HIT: `{runtime.low_atr_hit}`",
-                        f"• HIGH_ATR_HIT: `{runtime.high_atr_hit}`",
-                        f"• SETUP_ARMED: `{runtime.setup_armed}`",
-                        f"• SETUP_REFERENCE_PRICE: `{runtime.setup_reference_price}`",
-                        f"• DESIRED_SIDE: `{runtime.desired_side}`",
-                        f"• POSITION_SIDE: `{runtime.position_side}`",
-                        f"• EVENT: `{runtime.event}`",
-                        f"• BARS_SINCE_LAST_EVENT: `{getattr(runtime, 'bars_since_last_event', None)}`",
-                        f"• CLOSE: `{runtime.close}`",
+                        "⚠️ *Trade executado, mas o gráfico não foi gerado*",
+                        f"• Strategy ID: `{signal.strategy_id}`",
+                        f"• Symbol: `{signal.symbol}`",
+                        f"• Motivo: `{exc}`",
                     ]
                 )
+            )
+            return
 
-            text = "\n".join(lines)
-            await self._notifier.send_message(text)
-
-            if chart_path is not None:
+        if chart_path is not None:
+            try:
+                await self._notifier.send_photo(
+                    chart_path,
+                    caption=f"{signal.symbol} - {self._enum_value(signal.signal_type)}",
+                )
+            except Exception as exc:
+                self._logger.warning("Trade success chart notification failed: %s", exc)
+                await self._send_text_safe(
+                    "\n".join(
+                        [
+                            "⚠️ *Trade executado, mas o envio do gráfico falhou*",
+                            f"• Strategy ID: `{signal.strategy_id}`",
+                            f"• Symbol: `{signal.symbol}`",
+                            f"• Motivo: `{exc}`",
+                        ]
+                    )
+                )
+            finally:
                 try:
-                    await self._notifier.send_photo(chart_path, caption=f"{signal.symbol} - {signal.signal_type.value}")
-                finally:
-                    try:
-                        os.remove(chart_path)
-                    except Exception:
-                        pass
-        except Exception as exc:
-            self._logger.warning("Trade success notification failed: %s", exc)
+                    os.remove(chart_path)
+                except Exception:
+                    pass
 
     async def _notify_failure(self, signal: TradeSignalEntity, error_message: str) -> None:
         """
@@ -236,20 +272,31 @@ class ExecuteTradeSignalPipelineUseCase:
         if self._notifier is None:
             return
 
+        text = "\n".join(
+            [
+                "❌ *Falha ao executar trade signal*",
+                f"• Strategy ID: `{signal.strategy_id}`",
+                f"• Symbol: `{signal.symbol}`",
+                f"• Tipo: `{self._enum_value(signal.signal_type)}`",
+                f"• Timestamp: `{signal.ts}`",
+                f"• Erro: `{error_message}`",
+            ]
+        )
+        await self._send_text_safe(text)
+
+    async def _send_text_safe(self, text: str) -> None:
+        """
+        Send one Telegram text safely.
+
+        Errors are logged but never propagated.
+        """
+        if self._notifier is None:
+            return
+
         try:
-            text = "\n".join(
-                [
-                    "❌ *Falha ao executar trade signal*",
-                    f"• Strategy ID: `{signal.strategy_id}`",
-                    f"• Symbol: `{signal.symbol}`",
-                    f"• Tipo: `{signal.signal_type}`",
-                    f"• Timestamp: `{signal.ts}`",
-                    f"• Erro: `{error_message}`",
-                ]
-            )
             await self._notifier.send_message(text)
         except Exception as exc:
-            self._logger.warning("Trade failure notification failed: %s", exc)
+            self._logger.warning("Telegram text notification failed: %s", exc)
 
     async def _build_chart_image(self, stream_key: str) -> Optional[str]:
         """
@@ -319,5 +366,24 @@ class ExecuteTradeSignalPipelineUseCase:
             "execution profile is disabled",
             "execution_account_id is missing",
             "unsupported trade signal type",
+            "minimum notional",
+            "below exchange minimum",
+            "order's notional must be no smaller than",
+            "quote_size_usd below exchange minimum notional",
+            "normalized order notional below exchange minimum",
         ]
         return any(pattern in raw for pattern in non_retryable_patterns)
+
+    def _normalize_signal_type(self, value: Any) -> TradeSignalType:
+        """
+        Normalize a stored signal type into the enum.
+        """
+        if isinstance(value, TradeSignalType):
+            return value
+        return TradeSignalType(str(value).strip().upper())
+
+    def _enum_value(self, value: Any) -> Any:
+        """
+        Return enum value when the object is an enum, otherwise return it unchanged.
+        """
+        return value.value if hasattr(value, "value") else value

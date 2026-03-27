@@ -8,6 +8,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
 from core.domain.entities.trade_signal_entity import TradeSignalEntity
+from core.domain.enums.trade_enums import TradeSignalStatus
 from core.repositories.trade_signal_repository import TradeSignalRepository
 
 
@@ -22,9 +23,6 @@ class TradeSignalRepositoryMongoDB(TradeSignalRepository):
     COLLECTION = "trade_signals"
 
     def __init__(self, db: AsyncIOMotorDatabase):
-        """
-        Initialize the repository with a MongoDB database handle.
-        """
         self._col = db[self.COLLECTION]
 
     async def ensure_indexes(self) -> None:
@@ -96,7 +94,7 @@ class TradeSignalRepositoryMongoDB(TradeSignalRepository):
         List pending trade signals.
         """
         cursor = (
-            self._col.find({"status": "PENDING"})
+            self._col.find({"status": TradeSignalStatus.PENDING.value})
             .sort([("ts", 1), ("created_at", 1)])
             .limit(int(limit))
         )
@@ -116,7 +114,7 @@ class TradeSignalRepositoryMongoDB(TradeSignalRepository):
             {"idempotency_key": signal.idempotency_key},
             {
                 "$set": {
-                    "status": "SENT",
+                    "status": TradeSignalStatus.SENT.value,
                     "execution_response": execution_response,
                     "last_error": None,
                     "updated_at": now_ms,
@@ -141,7 +139,7 @@ class TradeSignalRepositoryMongoDB(TradeSignalRepository):
             {"idempotency_key": signal.idempotency_key},
             {
                 "$set": {
-                    "status": "FAILED",
+                    "status": TradeSignalStatus.FAILED.value,
                     "last_error": str(error_message),
                     "updated_at": now_ms,
                     "updated_at_iso": now_iso,

@@ -71,6 +71,5 @@ class TradeStrategyRuntimeSnapshotEntity(MongoEntity):
     bars_since_last_event: int = 1000000
 
     model_config = ConfigDict(
-        extra="ignore",
-        use_enum_values=True,
+        extra="ignore"
     )
