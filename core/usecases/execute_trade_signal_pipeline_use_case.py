@@ -152,11 +152,12 @@ class ExecuteTradeSignalPipelineUseCase:
             TradeSignalType.CLOSE_SHORT,
             TradeSignalType.CLOSE_POSITION,
         }:
+            close_reason = str(signal.payload.get("event") or signal_type.value).strip().upper()
             return await self._trade_execution_client.close_position(
                 strategy_id=str(signal.strategy_id),
                 execution_account_id=execution_account_id,
                 symbol=str(signal.symbol).upper(),
-                close_reason=signal_type.value,
+                close_reason=close_reason,
                 signal_id=str(signal.id) if signal.id else None,
                 signal_ts=int(signal.ts),
                 idempotency_key=str(signal.idempotency_key),

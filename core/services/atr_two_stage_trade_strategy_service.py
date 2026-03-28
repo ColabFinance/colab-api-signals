@@ -50,6 +50,33 @@ class AtrTwoStageTradeStrategyService:
         """
         self._indicator_service = indicator_service or TradeIndicatorCalculationService()
 
+    def _compute_open_trade_loss_pct(
+        self,
+        *,
+        position_side: Optional[TradePositionSide],
+        entry_reference_price: Optional[float],
+        current_price: float,
+    ) -> float:
+        """
+        Compute the open-trade loss ratio against the stored entry reference price.
+
+        This returns a fraction in the [0, +inf) domain, not a percentage:
+        - LONG: loss when current price is below entry
+        - SHORT: loss when current price is above entry
+        """
+        normalized_side = self._normalize_position_side(position_side)
+        entry = float(entry_reference_price or 0.0)
+
+        if normalized_side is None or entry <= 0.0:
+            return 0.0
+
+        if normalized_side == TradePositionSide.LONG:
+            adverse_move = max(0.0, (entry - float(current_price)) / entry)
+        else:
+            adverse_move = max(0.0, (float(current_price) - entry) / entry)
+
+        return float(adverse_move)
+
     def required_bars(self, strategy: TradeStrategyEntity) -> int:
         """
         Return the required candle window for evaluating the strategy safely.
@@ -132,6 +159,7 @@ class AtrTwoStageTradeStrategyService:
             setup_armed = False
             setup_reference_price: Optional[float] = None
             position_side: Optional[TradePositionSide] = None
+            entry_reference_price: Optional[float] = None
             bars_since_last_event = 1000000
         else:
             previous_ts = int(previous_snapshot.close_time)
@@ -148,6 +176,11 @@ class AtrTwoStageTradeStrategyService:
                 else None
             )
             position_side = self._normalize_position_side(previous_snapshot.position_side)
+            entry_reference_price = (
+                float(previous_snapshot.entry_reference_price)
+                if getattr(previous_snapshot, "entry_reference_price", None) is not None
+                else None
+            )
             bars_since_last_event = int(getattr(previous_snapshot, "bars_since_last_event", 1000000) or 1000000)
 
         if not indices_to_process:
@@ -194,6 +227,12 @@ class AtrTwoStageTradeStrategyService:
                     trade_mode=params.trade_mode,
                 )
 
+            open_trade_loss_pct_before_event = self._compute_open_trade_loss_pct(
+                position_side=position_side,
+                entry_reference_price=entry_reference_price,
+                current_price=candle_close,
+            )
+
             can_fire = int(bars_since_last_event) > int(max(0, params.cooloff_bars))
             is_allowed_day = self._is_allowed_day(candle_close_time, allowed_days)
 
@@ -206,13 +245,56 @@ class AtrTwoStageTradeStrategyService:
             signal_for_candle: Optional[Dict[str, Any]] = None
 
             if position_side is not None:
-                if low_atr_hit and can_fire:
+                if (
+                    params.max_loss_pct is not None
+                    and open_trade_loss_pct_before_event >= float(params.max_loss_pct)
+                    and can_fire
+                ):
                     closed_side = position_side
+                    closed_entry_reference_price = entry_reference_price
+
+                    exit_signal = 1
+                    event = TradeEvent.MAX_LOSS_STOP
+
+                    position_side = None
+                    entry_reference_price = None
+                    setup_armed = False
+                    setup_reference_price = None
+                    bars_since_last_event = 0
+
+                    if closed_side == TradePositionSide.LONG:
+                        close_signal_type = TradeSignalType.CLOSE_LONG
+                    elif closed_side == TradePositionSide.SHORT:
+                        close_signal_type = TradeSignalType.CLOSE_SHORT
+                    else:
+                        close_signal_type = TradeSignalType.CLOSE_POSITION
+
+                    signal_for_candle = {
+                        "signal_type": close_signal_type,
+                        "ts": candle_close_time,
+                        "close": candle_close,
+                        "event": event,
+                        "position_side": closed_side,
+                        "atr": atr_now,
+                        "atr_pct": atr_pct_now,
+                        "setup_reference_price": setup_reference_price,
+                        "entry_reference_price": closed_entry_reference_price,
+                        "open_trade_loss_pct": float(open_trade_loss_pct_before_event),
+                        "runtime_state": self._resolve_runtime_state(
+                            setup_armed=setup_armed,
+                            position_side=position_side,
+                        ),
+                    }
+
+                elif low_atr_hit and can_fire:
+                    closed_side = position_side
+                    closed_entry_reference_price = entry_reference_price
 
                     exit_signal = 1
                     event = TradeEvent.ATR_LOW_EXIT
 
                     position_side = None
+                    entry_reference_price = None
                     setup_armed = True
                     setup_reference_price = candle_close
                     bars_since_last_event = 0
@@ -233,6 +315,8 @@ class AtrTwoStageTradeStrategyService:
                         "atr": atr_now,
                         "atr_pct": atr_pct_now,
                         "setup_reference_price": setup_reference_price,
+                        "entry_reference_price": closed_entry_reference_price,
+                        "open_trade_loss_pct": float(open_trade_loss_pct_before_event),
                         "runtime_state": self._resolve_runtime_state(
                             setup_armed=setup_armed,
                             position_side=position_side,
@@ -258,6 +342,7 @@ class AtrTwoStageTradeStrategyService:
                         event = TradeEvent.OPEN_SHORT
 
                     position_side = opened_side
+                    entry_reference_price = candle_close
                     setup_armed = False
                     setup_reference_price = None
                     bars_since_last_event = 0
@@ -271,11 +356,19 @@ class AtrTwoStageTradeStrategyService:
                         "atr": atr_now,
                         "atr_pct": atr_pct_now,
                         "setup_reference_price": setup_reference_price,
+                        "entry_reference_price": entry_reference_price,
+                        "open_trade_loss_pct": 0.0,
                         "runtime_state": self._resolve_runtime_state(
                             setup_armed=setup_armed,
                             position_side=position_side,
                         ),
                     }
+
+            runtime_open_trade_loss_pct = self._compute_open_trade_loss_pct(
+                position_side=position_side,
+                entry_reference_price=entry_reference_price,
+                current_price=candle_close,
+            )
 
             runtime_state = self._resolve_runtime_state(
                 setup_armed=setup_armed,
@@ -307,6 +400,8 @@ class AtrTwoStageTradeStrategyService:
                 "setup_reference_price": setup_reference_price,
                 "desired_side": desired_side,
                 "position_side": position_side,
+                "entry_reference_price": entry_reference_price,
+                "open_trade_loss_pct": float(runtime_open_trade_loss_pct),
                 "event": event,
                 "signal_up": int(signal_up),
                 "signal_down": int(signal_down),

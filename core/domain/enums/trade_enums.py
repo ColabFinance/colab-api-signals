@@ -71,7 +71,8 @@ class TradeEvent(str, Enum):
     ATR_LOW_EXIT = "ATR_LOW_EXIT"
     OPEN_LONG = "OPEN_LONG"
     OPEN_SHORT = "OPEN_SHORT"
-
+    MAX_LOSS_STOP = "MAX_LOSS_STOP"
+    
 
 class TradeExecutionTarget(str, Enum):
     """

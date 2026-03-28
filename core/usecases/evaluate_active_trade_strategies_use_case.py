@@ -138,6 +138,8 @@ class EvaluateActiveTradeStrategiesUseCase:
                         "atr": signal_dict.get("atr"),
                         "atr_pct": signal_dict.get("atr_pct"),
                         "setup_reference_price": signal_dict.get("setup_reference_price"),
+                        "entry_reference_price": signal_dict.get("entry_reference_price"),
+                        "open_trade_loss_pct": signal_dict.get("open_trade_loss_pct"),
                         "strategy_type": self._enum_value(strategy.strategy_type),
                         "execution_target": self._enum_value(strategy.execution_target),
                         "execution_account_id": strategy.execution_account_id,
