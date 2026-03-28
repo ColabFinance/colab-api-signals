@@ -30,6 +30,7 @@ class TradeStrategyParamsEntity(BaseModel):
     trade_mode: TradeMode = TradeMode.FLIP
     reverse_signal: bool = False
     allowed_weekdays: Optional[List[str]] = None
+    max_loss_pct: Optional[float] = None
 
     model_config = ConfigDict(
         extra="ignore"

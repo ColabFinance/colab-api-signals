@@ -18,8 +18,6 @@ from core.domain.enums.trade_enums import (
 class TradeStrategyParamsDTO(BaseModel):
     """
     Parameters for trade strategy evaluation.
-
-    This DTO currently supports ATR two-stage strategies evaluated on 1m candles.
     """
 
     atr_window: int = Field(..., ge=1)
@@ -30,6 +28,7 @@ class TradeStrategyParamsDTO(BaseModel):
     trade_mode: TradeMode = Field(default=TradeMode.FLIP)
     reverse_signal: bool = Field(default=False)
     allowed_weekdays: Optional[List[str]] = Field(default=None)
+    max_loss_pct: Optional[float] = Field(default=None, gt=0, le=1)
 
     model_config = ConfigDict(use_enum_values=True)
 

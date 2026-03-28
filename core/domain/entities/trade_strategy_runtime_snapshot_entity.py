@@ -59,6 +59,9 @@ class TradeStrategyRuntimeSnapshotEntity(MongoEntity):
     desired_side: Optional[TradePositionSide] = None
     position_side: Optional[TradePositionSide] = None
 
+    entry_reference_price: Optional[float] = None
+    open_trade_loss_pct: float = 0.0
+
     event: Optional[TradeEvent] = None
 
     signal_up: int = 0
