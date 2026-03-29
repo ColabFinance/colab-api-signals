@@ -160,6 +160,45 @@ class TradeStrategyUseCase:
         """
         return await self.signal_repo.list(strategy_id=strategy_id, limit=int(limit))
 
+    async def list_signals_paginated(
+        self,
+        *,
+        strategy_id: Optional[str] = None,
+        limit: int = 10,
+        page: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> dict:
+        """
+        List trade signals with pagination support for strategy detail screens.
+        """
+        resolved_limit = int(limit)
+        resolved_offset = int(offset or 0)
+
+        if page is not None:
+            resolved_page = max(1, int(page))
+            resolved_offset = (resolved_page - 1) * resolved_limit
+        else:
+            resolved_page = (resolved_offset // resolved_limit) + 1
+
+        items = await self.signal_repo.list_paginated(
+            strategy_id=strategy_id,
+            limit=resolved_limit,
+            offset=resolved_offset,
+        )
+        total = await self.signal_repo.count(strategy_id=strategy_id)
+
+        return {
+            "items": items,
+            "pagination": {
+                "limit": resolved_limit,
+                "offset": resolved_offset,
+                "page": resolved_page,
+                "total": int(total),
+                "has_next": (resolved_offset + resolved_limit) < int(total),
+                "has_prev": resolved_offset > 0,
+            },
+        }
+
     async def get_latest_runtime_snapshot(self, *, strategy_id: str):
         """
         Fetch the latest runtime snapshot for a strategy.
