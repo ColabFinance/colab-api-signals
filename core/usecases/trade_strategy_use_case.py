@@ -52,6 +52,12 @@ class TradeStrategyUseCase:
         )
         return await self.strategy_repo.create(ent)
 
+    async def get_strategy_by_id(self, *, strategy_id: str) -> Optional[TradeStrategyEntity]:
+        """
+        Fetch one trade strategy by its identifier.
+        """
+        return await self.strategy_repo.get_by_id(str(strategy_id))
+
     async def list_strategies(
         self,
         *,

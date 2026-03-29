@@ -233,3 +233,29 @@ async def list_trade_strategy_runtime_history(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list runtime snapshots: {exc}") from exc
+
+
+@router.get("/{strategy_id}", response_model=dict)
+async def get_trade_strategy_by_id(
+    strategy_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Fetch one trade strategy by identifier.
+    """
+    try:
+        uc = get_use_case(db)
+        await uc.ensure_indexes()
+
+        ent = await uc.get_strategy_by_id(strategy_id=strategy_id)
+        if ent is None:
+            raise HTTPException(status_code=404, detail="Trade strategy not found.")
+
+        data = TradeStrategyOutDTO.model_validate(ent.model_dump())
+        return {"ok": True, "message": "ok", "data": data}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch trade strategy: {exc}") from exc

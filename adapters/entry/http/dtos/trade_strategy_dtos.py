@@ -148,6 +148,11 @@ class TradeSignalOutDTO(BaseModel):
     status: TradeSignalStatus
     idempotency_key: str
     payload: dict
+
+    attempts: int = 0
+    last_error: Optional[str] = None
+    execution_response: Optional[dict] = None
+
     created_at: Optional[int] = None
     created_at_iso: Optional[str] = None
 
