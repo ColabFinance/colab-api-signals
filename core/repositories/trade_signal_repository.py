@@ -14,13 +14,13 @@ class TradeSignalRepository(Protocol):
         """
         Ensure repository indexes exist.
         """
-        ...
+        raise NotImplementedError
 
     async def upsert_by_idempotency_key(self, signal: TradeSignalEntity) -> TradeSignalEntity:
         """
         Upsert a trade signal using its idempotency key.
         """
-        ...
+        raise NotImplementedError
 
     async def list(
         self,
@@ -31,13 +31,35 @@ class TradeSignalRepository(Protocol):
         """
         List generated trade signals.
         """
-        ...
+        raise NotImplementedError
+
+    async def list_paginated(
+        self,
+        *,
+        strategy_id: Optional[str] = None,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> List[TradeSignalEntity]:
+        """
+        List generated trade signals with pagination support.
+        """
+        raise NotImplementedError
+
+    async def count(
+        self,
+        *,
+        strategy_id: Optional[str] = None,
+    ) -> int:
+        """
+        Count generated trade signals for pagination.
+        """
+        raise NotImplementedError
 
     async def list_pending(self, limit: int) -> List[TradeSignalEntity]:
         """
         List pending trade signals.
         """
-        ...
+        raise NotImplementedError
 
     async def mark_success(
         self,
@@ -47,7 +69,7 @@ class TradeSignalRepository(Protocol):
         """
         Mark a trade signal as successfully executed.
         """
-        ...
+        raise NotImplementedError
 
     async def mark_failure(
         self,
@@ -57,4 +79,4 @@ class TradeSignalRepository(Protocol):
         """
         Mark a trade signal as failed.
         """
-        ...
+        raise NotImplementedError

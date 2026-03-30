@@ -14,19 +14,19 @@ class TradeStrategyRuntimeSnapshotRepository(Protocol):
         """
         Ensure repository indexes exist.
         """
-        ...
+        raise NotImplementedError
 
     async def upsert(self, snapshot: TradeStrategyRuntimeSnapshotEntity) -> TradeStrategyRuntimeSnapshotEntity:
         """
         Upsert a runtime snapshot using strategy_id and ts.
         """
-        ...
+        raise NotImplementedError
 
     async def get_latest_by_strategy_id(self, strategy_id: str) -> Optional[TradeStrategyRuntimeSnapshotEntity]:
         """
         Fetch the latest runtime snapshot for a strategy.
         """
-        ...
+        raise NotImplementedError
 
     async def list_by_strategy_id(
         self,
@@ -36,4 +36,4 @@ class TradeStrategyRuntimeSnapshotRepository(Protocol):
         """
         List runtime snapshot history for a strategy.
         """
-        ...
+        raise NotImplementedError

@@ -27,11 +27,17 @@ class TradeStrategyUseCase:
     runtime_snapshot_repo: TradeStrategyRuntimeSnapshotRepository
 
     async def ensure_indexes(self) -> None:
+        """
+        Ensure indexes required by all repositories exist.
+        """
         await self.strategy_repo.ensure_indexes()
         await self.signal_repo.ensure_indexes()
         await self.runtime_snapshot_repo.ensure_indexes()
 
     async def create_strategy(self, data: TradeStrategyCreateDTO) -> TradeStrategyEntity:
+        """
+        Create and persist one trade strategy from the request DTO.
+        """
         ent = TradeStrategyEntity(
             name=str(data.name).strip(),
             symbol=str(data.symbol).strip().upper(),
@@ -46,6 +52,12 @@ class TradeStrategyUseCase:
         )
         return await self.strategy_repo.create(ent)
 
+    async def get_strategy_by_id(self, *, strategy_id: str) -> Optional[TradeStrategyEntity]:
+        """
+        Fetch one trade strategy by its identifier.
+        """
+        return await self.strategy_repo.get_by_id(str(strategy_id))
+
     async def list_strategies(
         self,
         *,
@@ -53,6 +65,9 @@ class TradeStrategyUseCase:
         status: Optional[str] = None,
         limit: int = 500,
     ) -> List[TradeStrategyEntity]:
+        """
+        List trade strategies using the legacy non-paginated route.
+        """
         normalized_status = TradeStrategyStatus(str(status).strip().upper()) if status else None
 
         return await self.strategy_repo.list(
@@ -61,7 +76,76 @@ class TradeStrategyUseCase:
             limit=int(limit),
         )
 
+    async def list_public_strategies(
+        self,
+        *,
+        status: Optional[str] = None,
+        stream_key: Optional[str] = None,
+        symbol: Optional[str] = None,
+        execution_account_id: Optional[str] = None,
+        search: Optional[str] = None,
+        limit: int = 20,
+        page: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> dict:
+        """
+        List trade strategies for public user-facing pages with pagination and filters.
+
+        When `page` is provided, it has priority over `offset`.
+        When only `limit` is provided, the query behaves like a simple limited list.
+        """
+        normalized_status = TradeStrategyStatus(str(status).strip().upper()).value if status else None
+        normalized_stream_key = str(stream_key).strip().lower() if stream_key else None
+        normalized_symbol = str(symbol).strip().upper() if symbol else None
+        normalized_execution_account_id = str(execution_account_id).strip() if execution_account_id else None
+        normalized_search = str(search).strip() if search else None
+
+        resolved_limit = int(limit)
+        resolved_offset = int(offset or 0)
+
+        if page is not None:
+            resolved_page = max(1, int(page))
+            resolved_offset = (resolved_page - 1) * resolved_limit
+        else:
+            resolved_page = (resolved_offset // resolved_limit) + 1
+
+        items = await self.strategy_repo.list_public(
+            status=normalized_status,
+            stream_key=normalized_stream_key,
+            symbol=normalized_symbol,
+            execution_account_id=normalized_execution_account_id,
+            search=normalized_search,
+            limit=resolved_limit,
+            offset=resolved_offset,
+        )
+        total = await self.strategy_repo.count_public(
+            status=normalized_status,
+            stream_key=normalized_stream_key,
+            symbol=normalized_symbol,
+            execution_account_id=normalized_execution_account_id,
+            search=normalized_search,
+        )
+        summary = await self.strategy_repo.get_public_summary()
+        filter_options = await self.strategy_repo.list_public_filter_options()
+
+        return {
+            "items": items,
+            "pagination": {
+                "limit": resolved_limit,
+                "offset": resolved_offset,
+                "page": resolved_page,
+                "total": int(total),
+                "has_next": (resolved_offset + resolved_limit) < int(total),
+                "has_prev": resolved_offset > 0,
+            },
+            "summary": summary,
+            "filter_options": filter_options,
+        }
+
     async def set_status(self, *, strategy_id: str, status: str) -> Optional[TradeStrategyEntity]:
+        """
+        Update the status of one stored trade strategy.
+        """
         normalized_status = TradeStrategyStatus(str(status).strip().upper())
         return await self.strategy_repo.set_status(str(strategy_id), normalized_status.value)
 
@@ -71,7 +155,49 @@ class TradeStrategyUseCase:
         strategy_id: Optional[str] = None,
         limit: int = 200,
     ):
+        """
+        List trade signals for one strategy or for the whole module.
+        """
         return await self.signal_repo.list(strategy_id=strategy_id, limit=int(limit))
+
+    async def list_signals_paginated(
+        self,
+        *,
+        strategy_id: Optional[str] = None,
+        limit: int = 10,
+        page: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> dict:
+        """
+        List trade signals with pagination support for strategy detail screens.
+        """
+        resolved_limit = int(limit)
+        resolved_offset = int(offset or 0)
+
+        if page is not None:
+            resolved_page = max(1, int(page))
+            resolved_offset = (resolved_page - 1) * resolved_limit
+        else:
+            resolved_page = (resolved_offset // resolved_limit) + 1
+
+        items = await self.signal_repo.list_paginated(
+            strategy_id=strategy_id,
+            limit=resolved_limit,
+            offset=resolved_offset,
+        )
+        total = await self.signal_repo.count(strategy_id=strategy_id)
+
+        return {
+            "items": items,
+            "pagination": {
+                "limit": resolved_limit,
+                "offset": resolved_offset,
+                "page": resolved_page,
+                "total": int(total),
+                "has_next": (resolved_offset + resolved_limit) < int(total),
+                "has_prev": resolved_offset > 0,
+            },
+        }
 
     async def get_latest_runtime_snapshot(self, *, strategy_id: str):
         """

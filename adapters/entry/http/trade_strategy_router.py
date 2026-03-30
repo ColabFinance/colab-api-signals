@@ -67,6 +67,9 @@ async def list_trade_strategies(
 ):
     """
     List trade strategies with optional filters.
+
+    This legacy route remains unchanged so existing screens such as tradeHome
+    continue working without any frontend changes.
     """
     try:
         uc = get_use_case(db)
@@ -83,6 +86,55 @@ async def list_trade_strategies(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list trade strategies: {exc}") from exc
+
+
+@router.get("/public", response_model=dict)
+async def list_public_trade_strategies(
+    status: Optional[str] = Query(None),
+    stream_key: Optional[str] = Query(None),
+    symbol: Optional[str] = Query(None),
+    execution_account_id: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=5000),
+    page: Optional[int] = Query(None, ge=1),
+    offset: Optional[int] = Query(None, ge=0),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    List trade strategies for public user-facing pages with pagination support.
+
+    When only `limit` is sent, the route behaves like a simple limited list.
+    When `page` is sent, page-based pagination is applied.
+    """
+    try:
+        uc = get_use_case(db)
+        await uc.ensure_indexes()
+
+        result = await uc.list_public_strategies(
+            status=status,
+            stream_key=stream_key,
+            symbol=symbol,
+            execution_account_id=execution_account_id,
+            search=search,
+            limit=int(limit),
+            page=page,
+            offset=offset,
+        )
+
+        data = [TradeStrategyOutDTO.model_validate(item.model_dump()) for item in result["items"]]
+
+        return {
+            "ok": True,
+            "message": "ok",
+            "data": data,
+            "pagination": result["pagination"],
+            "summary": result["summary"],
+            "filter_options": result["filter_options"],
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to list public trade strategies: {exc}") from exc
 
 
 @router.post("/status/set", response_model=dict)
@@ -114,24 +166,39 @@ async def set_trade_strategy_status(
 @router.get("/signals", response_model=dict)
 async def list_trade_signals(
     strategy_id: Optional[str] = Query(None),
-    limit: int = Query(200, ge=1, le=5000),
+    limit: int = Query(10, ge=1, le=5000),
+    page: Optional[int] = Query(None, ge=1),
+    offset: Optional[int] = Query(None, ge=0),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """
-    List generated trade signals.
+    List generated trade signals with pagination support.
+
+    This route keeps the existing path while adding `page` and `offset`.
     """
     try:
         uc = get_use_case(db)
         await uc.ensure_indexes()
 
-        items = await uc.list_signals(strategy_id=strategy_id, limit=int(limit))
-        data = [TradeSignalOutDTO.model_validate(item.model_dump()) for item in items]
-        return {"ok": True, "message": "ok", "data": data}
+        result = await uc.list_signals_paginated(
+            strategy_id=strategy_id,
+            limit=int(limit),
+            page=page,
+            offset=offset,
+        )
+        data = [TradeSignalOutDTO.model_validate(item.model_dump()) for item in result["items"]]
+
+        return {
+            "ok": True,
+            "message": "ok",
+            "data": data,
+            "pagination": result["pagination"],
+        }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list trade signals: {exc}") from exc
-
+    
 
 @router.get("/runtime/latest", response_model=dict)
 async def get_latest_trade_strategy_runtime_snapshot(
@@ -181,3 +248,29 @@ async def list_trade_strategy_runtime_history(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list runtime snapshots: {exc}") from exc
+
+
+@router.get("/{strategy_id}", response_model=dict)
+async def get_trade_strategy_by_id(
+    strategy_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Fetch one trade strategy by identifier.
+    """
+    try:
+        uc = get_use_case(db)
+        await uc.ensure_indexes()
+
+        ent = await uc.get_strategy_by_id(strategy_id=strategy_id)
+        if ent is None:
+            raise HTTPException(status_code=404, detail="Trade strategy not found.")
+
+        data = TradeStrategyOutDTO.model_validate(ent.model_dump())
+        return {"ok": True, "message": "ok", "data": data}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch trade strategy: {exc}") from exc

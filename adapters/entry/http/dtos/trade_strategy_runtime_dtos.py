@@ -53,6 +53,9 @@ class TradeStrategyRuntimeSnapshotOutDTO(BaseModel):
     signal_down_first: int
     exit_signal: int
 
+    runtime_state: Optional[str] = None
+    bars_since_last_event: int = 0
+
     created_at: Optional[int] = None
     created_at_iso: Optional[str] = None
     updated_at: Optional[int] = None

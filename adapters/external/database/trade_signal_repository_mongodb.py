@@ -149,3 +149,58 @@ class TradeSignalRepositoryMongoDB(TradeSignalRepository):
                 },
             },
         )
+    
+    async def list(
+        self,
+        *,
+        strategy_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[TradeSignalEntity]:
+        """
+        List generated trade signals ordered by newest first.
+        """
+        return await self.list_paginated(
+            strategy_id=strategy_id,
+            limit=int(limit),
+            offset=0,
+        )
+
+    async def list_paginated(
+        self,
+        *,
+        strategy_id: Optional[str] = None,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> List[TradeSignalEntity]:
+        """
+        List generated trade signals with pagination support ordered by newest first.
+        """
+        query: dict = {}
+
+        if strategy_id:
+            query["strategy_id"] = str(strategy_id)
+
+        cursor = (
+            self._col.find(query)
+            .sort([("ts", -1), ("created_at", -1)])
+            .skip(int(offset))
+            .limit(int(limit))
+        )
+
+        docs = await cursor.to_list(length=int(limit))
+        return [TradeSignalEntity.from_mongo(doc) for doc in docs if doc]
+
+    async def count(
+        self,
+        *,
+        strategy_id: Optional[str] = None,
+    ) -> int:
+        """
+        Count generated trade signals for pagination.
+        """
+        query: dict = {}
+
+        if strategy_id:
+            query["strategy_id"] = str(strategy_id)
+
+        return int(await self._col.count_documents(query))

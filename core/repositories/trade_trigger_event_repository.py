@@ -12,10 +12,10 @@ class TradeTriggerEventRepository(Protocol):
         """
         Ensure repository indexes exist.
         """
-        ...
+        raise NotImplementedError
 
     async def mark_if_new(self, stream_key: str, ts: int) -> bool:
         """
         Mark a trigger event as new if it was not seen before.
         """
-        ...
+        raise NotImplementedError
