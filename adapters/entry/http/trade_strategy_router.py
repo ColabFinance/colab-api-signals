@@ -11,6 +11,7 @@ from adapters.entry.http.dtos.trade_strategy_dtos import (
     TradeStrategyCreateDTO,
     TradeStrategyOutDTO,
     TradeStrategyStatusSetDTO,
+    TradeStrategyUpdateDTO,
 )
 from adapters.entry.http.dtos.trade_strategy_runtime_dtos import (
     TradeStrategyRuntimeSnapshotOutDTO,
@@ -56,6 +57,37 @@ async def create_trade_strategy(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to create trade strategy: {exc}") from exc
+
+
+@router.patch("/{strategy_id}", response_model=dict)
+async def update_trade_strategy(
+    strategy_id: str,
+    body: TradeStrategyUpdateDTO,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Partially update an existing trade strategy.
+
+    This endpoint supports changing top-level fields and nested strategy params.
+    Nested params are merged with the currently stored configuration and then
+    validated again using the canonical strategy entity.
+    """
+    try:
+        uc = get_use_case(db)
+        await uc.ensure_indexes()
+
+        ent = await uc.update_strategy(strategy_id=strategy_id, data=body)
+        if ent is None:
+            raise HTTPException(status_code=404, detail="Trade strategy not found.")
+
+        data = TradeStrategyOutDTO.model_validate(ent.model_dump())
+        return {"ok": True, "message": "ok", "data": data}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to update trade strategy: {exc}") from exc
 
 
 @router.get("", response_model=dict)

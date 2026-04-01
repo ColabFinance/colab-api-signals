@@ -10,6 +10,7 @@ from core.domain.entities.trade_strategy_runtime_snapshot_entity import (
 )
 from core.domain.enums.trade_enums import (
     TradeAtrThresholdMode,
+    TradeAtrThresholdSource,
     TradeEvent,
     TradeMode,
     TradePositionSide,
@@ -80,12 +81,49 @@ class AtrTwoStageTradeStrategyService:
     def required_bars(self, strategy: TradeStrategyEntity) -> int:
         """
         Return the required candle window for evaluating the strategy safely.
+
+        The required window now considers:
+        - ATR warmup
+        - optional dynamic ATR percentile windows
+        - optional regime MA windows
+        - cooloff / operational room
         """
         params = strategy.params
-        return max(
+
+        need = max(
             self._indicator_service.required_bars_for_atr(atr_window=int(params.atr_window)),
             int(params.atr_window) + int(params.cooloff_bars) + 10,
         )
+
+        if self._dynamic_atr_enabled(params):
+            need = max(
+                need,
+                self._indicator_service.required_bars_for_atr(atr_window=int(params.atr_window))
+                + self._indicator_service.required_bars_for_dynamic_threshold(
+                    dynamic_window=int(params.atr_dynamic_window)
+                )
+                + 10,
+            )
+
+        if params.regime_trend_ma_window is not None:
+            need = max(
+                need,
+                self._indicator_service.required_bars_for_ma(
+                    ma_window=int(params.regime_trend_ma_window)
+                )
+                + 10,
+            )
+
+        if params.regime_structure_ma_window is not None:
+            need = max(
+                need,
+                self._indicator_service.required_bars_for_ma(
+                    ma_window=int(params.regime_structure_ma_window)
+                )
+                + 10,
+            )
+
+        return max(50, int(need))
 
     def evaluate_latest(
         self,
@@ -142,6 +180,7 @@ class AtrTwoStageTradeStrategyService:
             return None
 
         params = strategy.params
+
         atr_values, atr_pct_values = self._indicator_service.compute_atr_and_atr_pct(
             highs=data["high"].tolist(),
             lows=data["low"].tolist(),
@@ -153,6 +192,38 @@ class AtrTwoStageTradeStrategyService:
 
         data["atr"] = atr_values
         data["atr_pct"] = atr_pct_values
+
+        atr_base_col = "atr" if params.atr_threshold_mode == TradeAtrThresholdMode.ATR else "atr_pct"
+        atr_threshold_source = (
+            TradeAtrThresholdSource.DYNAMIC
+            if self._dynamic_atr_enabled(params)
+            else TradeAtrThresholdSource.FIXED
+        )
+
+        if atr_threshold_source == TradeAtrThresholdSource.DYNAMIC:
+            low_thr_values, high_thr_values = self._indicator_service.compute_dynamic_thresholds(
+                values=data[atr_base_col].tolist(),
+                window=int(params.atr_dynamic_window),
+                low_percentile=float(params.atr_dynamic_low_percentile),
+                high_percentile=float(params.atr_dynamic_high_percentile),
+                min_periods=params.atr_dynamic_min_periods,
+            )
+            data["atr_low_threshold_active"] = low_thr_values
+            data["atr_high_threshold_active"] = high_thr_values
+        else:
+            data["atr_low_threshold_active"] = float(params.atr_low_threshold)
+            data["atr_high_threshold_active"] = float(params.atr_high_threshold)
+
+        data["regime_trend_ma"] = self._indicator_service.compute_ma(
+            values=data["close"].tolist(),
+            window=params.regime_trend_ma_window,
+            ma_type=params.regime_trend_ma_type,
+        )
+        data["regime_structure_ma"] = self._indicator_service.compute_ma(
+            values=data["close"].tolist(),
+            window=params.regime_structure_ma_window,
+            ma_type=params.regime_structure_ma_type,
+        )
 
         if previous_snapshot is None:
             indices_to_process = list(range(1, len(data)))
@@ -211,12 +282,19 @@ class AtrTwoStageTradeStrategyService:
 
             atr_now = float(data.loc[idx, "atr"])
             atr_pct_now = float(data.loc[idx, "atr_pct"])
-            atr_value_for_threshold = float(
-                atr_now if params.atr_threshold_mode == TradeAtrThresholdMode.ATR else atr_pct_now
-            )
+            atr_value_for_threshold = float(data.loc[idx, atr_base_col])
 
-            low_atr_hit = int(atr_value_for_threshold <= float(params.atr_low_threshold))
-            high_atr_hit = int(atr_value_for_threshold >= float(params.atr_high_threshold))
+            atr_low_threshold_active = self._as_optional_float(data.loc[idx, "atr_low_threshold_active"])
+            atr_high_threshold_active = self._as_optional_float(data.loc[idx, "atr_high_threshold_active"])
+
+            low_atr_hit = int(
+                atr_low_threshold_active is not None
+                and atr_value_for_threshold <= float(atr_low_threshold_active)
+            )
+            high_atr_hit = int(
+                atr_high_threshold_active is not None
+                and atr_value_for_threshold >= float(atr_high_threshold_active)
+            )
 
             desired_side: Optional[TradePositionSide] = None
             if setup_armed:
@@ -226,6 +304,35 @@ class AtrTwoStageTradeStrategyService:
                     reverse_signal=bool(params.reverse_signal),
                     trade_mode=params.trade_mode,
                 )
+
+            regime_trend_ma_now = self._as_optional_float(data.loc[idx, "regime_trend_ma"])
+            regime_structure_ma_now = self._as_optional_float(data.loc[idx, "regime_structure_ma"])
+
+            regime_allows_long = self._regime_allows_side(
+                side=TradePositionSide.LONG,
+                price=candle_close,
+                trend_ma_value=regime_trend_ma_now,
+                structure_ma_value=regime_structure_ma_now,
+                strategy=strategy,
+            )
+            regime_allows_short = self._regime_allows_side(
+                side=TradePositionSide.SHORT,
+                price=candle_close,
+                trend_ma_value=regime_trend_ma_now,
+                structure_ma_value=regime_structure_ma_now,
+                strategy=strategy,
+            )
+            regime_allows_desired = (
+                self._regime_allows_side(
+                    side=desired_side,
+                    price=candle_close,
+                    trend_ma_value=regime_trend_ma_now,
+                    structure_ma_value=regime_structure_ma_now,
+                    strategy=strategy,
+                )
+                if desired_side is not None
+                else None
+            )
 
             open_trade_loss_pct_before_event = self._compute_open_trade_loss_pct(
                 position_side=position_side,
@@ -275,8 +382,15 @@ class AtrTwoStageTradeStrategyService:
                         "close": candle_close,
                         "event": event,
                         "position_side": closed_side,
+                        "desired_side": desired_side,
                         "atr": atr_now,
                         "atr_pct": atr_pct_now,
+                        "atr_threshold_source": atr_threshold_source,
+                        "atr_low_threshold_active": atr_low_threshold_active,
+                        "atr_high_threshold_active": atr_high_threshold_active,
+                        "regime_trend_ma": regime_trend_ma_now,
+                        "regime_structure_ma": regime_structure_ma_now,
+                        "regime_allows_desired": regime_allows_desired,
                         "setup_reference_price": setup_reference_price,
                         "entry_reference_price": closed_entry_reference_price,
                         "open_trade_loss_pct": float(open_trade_loss_pct_before_event),
@@ -312,8 +426,15 @@ class AtrTwoStageTradeStrategyService:
                         "close": candle_close,
                         "event": event,
                         "position_side": closed_side,
+                        "desired_side": desired_side,
                         "atr": atr_now,
                         "atr_pct": atr_pct_now,
+                        "atr_threshold_source": atr_threshold_source,
+                        "atr_low_threshold_active": atr_low_threshold_active,
+                        "atr_high_threshold_active": atr_high_threshold_active,
+                        "regime_trend_ma": regime_trend_ma_now,
+                        "regime_structure_ma": regime_structure_ma_now,
+                        "regime_allows_desired": regime_allows_desired,
                         "setup_reference_price": setup_reference_price,
                         "entry_reference_price": closed_entry_reference_price,
                         "open_trade_loss_pct": float(open_trade_loss_pct_before_event),
@@ -330,39 +451,53 @@ class AtrTwoStageTradeStrategyService:
                     event = TradeEvent.ARM_ON_LOW_ATR
 
                 elif setup_armed and high_atr_hit and desired_side is not None and is_allowed_day and can_fire:
-                    opened_side = desired_side
-
-                    if opened_side == TradePositionSide.LONG:
-                        signal_up = 1
-                        signal_up_first = 1
-                        event = TradeEvent.OPEN_LONG
+                    if regime_allows_desired is False:
+                        event = (
+                            TradeEvent.REGIME_BLOCKED_LONG
+                            if desired_side == TradePositionSide.LONG
+                            else TradeEvent.REGIME_BLOCKED_SHORT
+                        )
                     else:
-                        signal_down = 1
-                        signal_down_first = 1
-                        event = TradeEvent.OPEN_SHORT
+                        opened_side = desired_side
 
-                    position_side = opened_side
-                    entry_reference_price = candle_close
-                    setup_armed = False
-                    setup_reference_price = None
-                    bars_since_last_event = 0
+                        if opened_side == TradePositionSide.LONG:
+                            signal_up = 1
+                            signal_up_first = 1
+                            event = TradeEvent.OPEN_LONG
+                        else:
+                            signal_down = 1
+                            signal_down_first = 1
+                            event = TradeEvent.OPEN_SHORT
 
-                    signal_for_candle = {
-                        "signal_type": TradeSignalType(event.value),
-                        "ts": candle_close_time,
-                        "close": candle_close,
-                        "event": event,
-                        "position_side": opened_side,
-                        "atr": atr_now,
-                        "atr_pct": atr_pct_now,
-                        "setup_reference_price": setup_reference_price,
-                        "entry_reference_price": entry_reference_price,
-                        "open_trade_loss_pct": 0.0,
-                        "runtime_state": self._resolve_runtime_state(
-                            setup_armed=setup_armed,
-                            position_side=position_side,
-                        ),
-                    }
+                        position_side = opened_side
+                        entry_reference_price = candle_close
+                        setup_armed = False
+                        setup_reference_price = None
+                        bars_since_last_event = 0
+
+                        signal_for_candle = {
+                            "signal_type": TradeSignalType(event.value),
+                            "ts": candle_close_time,
+                            "close": candle_close,
+                            "event": event,
+                            "position_side": opened_side,
+                            "desired_side": desired_side,
+                            "atr": atr_now,
+                            "atr_pct": atr_pct_now,
+                            "atr_threshold_source": atr_threshold_source,
+                            "atr_low_threshold_active": atr_low_threshold_active,
+                            "atr_high_threshold_active": atr_high_threshold_active,
+                            "regime_trend_ma": regime_trend_ma_now,
+                            "regime_structure_ma": regime_structure_ma_now,
+                            "regime_allows_desired": regime_allows_desired,
+                            "setup_reference_price": setup_reference_price,
+                            "entry_reference_price": entry_reference_price,
+                            "open_trade_loss_pct": 0.0,
+                            "runtime_state": self._resolve_runtime_state(
+                                setup_armed=setup_armed,
+                                position_side=position_side,
+                            ),
+                        }
 
             runtime_open_trade_loss_pct = self._compute_open_trade_loss_pct(
                 position_side=position_side,
@@ -394,12 +529,24 @@ class AtrTwoStageTradeStrategyService:
                 "atr": atr_now,
                 "atr_pct": atr_pct_now,
                 "atr_value_for_threshold": atr_value_for_threshold,
+                "atr_threshold_source": atr_threshold_source,
+                "atr_low_threshold_active": atr_low_threshold_active,
+                "atr_high_threshold_active": atr_high_threshold_active,
                 "low_atr_hit": int(low_atr_hit),
                 "high_atr_hit": int(high_atr_hit),
                 "setup_armed": int(setup_armed),
                 "setup_reference_price": setup_reference_price,
                 "desired_side": desired_side,
                 "position_side": position_side,
+                "regime_trend_ma": regime_trend_ma_now,
+                "regime_structure_ma": regime_structure_ma_now,
+                "regime_allows_long": int(regime_allows_long),
+                "regime_allows_short": int(regime_allows_short),
+                "regime_allows_desired": (
+                    int(regime_allows_desired)
+                    if regime_allows_desired is not None
+                    else None
+                ),
                 "entry_reference_price": entry_reference_price,
                 "open_trade_loss_pct": float(runtime_open_trade_loss_pct),
                 "event": event,
@@ -421,6 +568,17 @@ class AtrTwoStageTradeStrategyService:
             "runtime_snapshot": latest_runtime_snapshot,
             "signal": latest_signal,
         }
+
+    def _dynamic_atr_enabled(self, params) -> bool:
+        """
+        Check whether dynamic ATR thresholds are enabled.
+        """
+        dynamic_core = [
+            params.atr_dynamic_window,
+            params.atr_dynamic_low_percentile,
+            params.atr_dynamic_high_percentile,
+        ]
+        return all(x is not None for x in dynamic_core)
 
     def _resolve_desired_side(
         self,
@@ -460,15 +618,84 @@ class AtrTwoStageTradeStrategyService:
 
         return None
 
-    def _normalize_allowed_weekdays(self, value: Optional[List[str]]) -> Optional[set[int]]:
+    def _side_allowed_by_ma(
+        self,
+        *,
+        side: TradePositionSide,
+        price: float,
+        ma_value: Optional[float],
+        reverse: bool = False,
+    ) -> bool:
         """
-        Normalize weekday names in Portuguese into weekday integers.
+        Check if a side is allowed by a single regime MA.
+        """
+        if ma_value is None or pd.isna(ma_value):
+            return False
+
+        if reverse is False:
+            if side == TradePositionSide.LONG:
+                return float(price) >= float(ma_value)
+            return float(price) <= float(ma_value)
+
+        if side == TradePositionSide.LONG:
+            return float(price) < float(ma_value)
+        return float(price) > float(ma_value)
+
+    def _regime_allows_side(
+        self,
+        *,
+        side: Optional[TradePositionSide],
+        price: float,
+        trend_ma_value: Optional[float],
+        structure_ma_value: Optional[float],
+        strategy: TradeStrategyEntity,
+    ) -> bool:
+        """
+        Check whether the optional regime filters allow the given side.
+
+        Legacy behavior is preserved:
+        - if both MA windows are None, both LONG and SHORT remain allowed
+        """
+        if side is None:
+            return False
+
+        params = strategy.params
+        reverse = bool(params.regime_reverse)
+
+        trend_ok = True
+        if params.regime_trend_ma_window is not None:
+            trend_ok = self._side_allowed_by_ma(
+                side=side,
+                price=price,
+                ma_value=trend_ma_value,
+                reverse=reverse,
+            )
+
+        structure_ok = True
+        if params.regime_structure_ma_window is not None:
+            structure_ok = self._side_allowed_by_ma(
+                side=side,
+                price=price,
+                ma_value=structure_ma_value,
+                reverse=reverse,
+            )
+
+        return bool(trend_ok and structure_ok)
+
+    def _normalize_allowed_weekdays(self, value: Optional[List[int | str]]) -> Optional[set[int]]:
+        """
+        Normalize weekday names in Portuguese or integers into weekday integers.
         """
         if value is None:
             return None
 
         out: set[int] = set()
         for item in value:
+            if isinstance(item, int):
+                if 0 <= int(item) <= 6:
+                    out.add(int(item))
+                continue
+
             raw = str(item).strip().lower()
             if not raw:
                 continue
@@ -531,3 +758,14 @@ class AtrTwoStageTradeStrategyService:
         if setup_armed:
             return TradeRuntimeState.ARMED
         return TradeRuntimeState.FLAT
+
+    def _as_optional_float(self, value: Any) -> Optional[float]:
+        """
+        Convert values to float while preserving missing values.
+        """
+        try:
+            if value is None or pd.isna(value):
+                return None
+            return float(value)
+        except Exception:
+            return None
