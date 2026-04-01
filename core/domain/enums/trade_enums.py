@@ -72,7 +72,9 @@ class TradeEvent(str, Enum):
     OPEN_LONG = "OPEN_LONG"
     OPEN_SHORT = "OPEN_SHORT"
     MAX_LOSS_STOP = "MAX_LOSS_STOP"
-    
+    REGIME_BLOCKED_LONG = "REGIME_BLOCKED_LONG"
+    REGIME_BLOCKED_SHORT = "REGIME_BLOCKED_SHORT"
+
 
 class TradeExecutionTarget(str, Enum):
     """
@@ -91,6 +93,15 @@ class TradeAtrThresholdMode(str, Enum):
     ATR_PCT = "atr_pct"
 
 
+class TradeAtrThresholdSource(str, Enum):
+    """
+    Source of the active ATR thresholds used for the current candle.
+    """
+
+    FIXED = "fixed"
+    DYNAMIC = "dynamic"
+
+
 class TradeMode(str, Enum):
     """
     Trading side policy used by the ATR two-stage strategy.
@@ -100,3 +111,12 @@ class TradeMode(str, Enum):
     LONG_ONLY = "long_only"
     SHORT_ONLY = "short_only"
     FLAT_ON_DOWN = "flat_on_down"
+
+
+class TradeMovingAverageType(str, Enum):
+    """
+    Moving-average type used by regime filters.
+    """
+
+    EMA = "ema"
+    SMA = "sma"

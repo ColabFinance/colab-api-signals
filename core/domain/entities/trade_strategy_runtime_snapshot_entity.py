@@ -6,6 +6,7 @@ from pydantic import ConfigDict
 
 from core.domain.entities.base_entity import MongoEntity
 from core.domain.enums.trade_enums import (
+    TradeAtrThresholdSource,
     TradeEvent,
     TradePositionSide,
     TradeRuntimeState,
@@ -51,6 +52,10 @@ class TradeStrategyRuntimeSnapshotEntity(MongoEntity):
     atr_pct: float = 0.0
     atr_value_for_threshold: float = 0.0
 
+    atr_threshold_source: TradeAtrThresholdSource = TradeAtrThresholdSource.FIXED
+    atr_low_threshold_active: Optional[float] = None
+    atr_high_threshold_active: Optional[float] = None
+
     low_atr_hit: int = 0
     high_atr_hit: int = 0
 
@@ -58,6 +63,12 @@ class TradeStrategyRuntimeSnapshotEntity(MongoEntity):
     setup_reference_price: Optional[float] = None
     desired_side: Optional[TradePositionSide] = None
     position_side: Optional[TradePositionSide] = None
+
+    regime_trend_ma: Optional[float] = None
+    regime_structure_ma: Optional[float] = None
+    regime_allows_long: int = 1
+    regime_allows_short: int = 1
+    regime_allows_desired: Optional[int] = None
 
     entry_reference_price: Optional[float] = None
     open_trade_loss_pct: float = 0.0

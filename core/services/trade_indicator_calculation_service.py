@@ -3,14 +3,20 @@ from __future__ import annotations
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
+
+from core.domain.enums.trade_enums import TradeMovingAverageType
 
 
 class TradeIndicatorCalculationService:
     """
     Pure calculation service used by trade evaluators.
 
-    This service computes ATR and ATR percent from OHLC candles and is intentionally
-    separated from api-market-data indicator snapshots.
+    This service computes:
+    - ATR
+    - ATR percent
+    - moving averages for regime filters
+    - dynamic ATR thresholds based on rolling percentiles
     """
 
     def compute_atr_and_atr_pct(
@@ -24,44 +30,125 @@ class TradeIndicatorCalculationService:
         """
         Compute ATR and ATR percent for the whole series.
 
-        Args:
-            highs: High prices in chronological order.
-            lows: Low prices in chronological order.
-            closes: Close prices in chronological order.
-            window: ATR smoothing window.
-
-        Returns:
-            A tuple of two lists:
-            - ATR values
-            - ATR percentage values
+        This implementation matches the new simulator logic:
+        - EWM ATR
+        - adjust=False
+        - min_periods=max(2, window // 2)
         """
         if not highs or not lows or not closes:
             return [], []
 
-        high_arr = np.array([float(x) for x in highs], dtype=float)
-        low_arr = np.array([float(x) for x in lows], dtype=float)
-        close_arr = np.array([float(x) for x in closes], dtype=float)
+        h = pd.to_numeric(pd.Series(list(highs)), errors="coerce")
+        l = pd.to_numeric(pd.Series(list(lows)), errors="coerce")
+        c = pd.to_numeric(pd.Series(list(closes)), errors="coerce").ffill()
 
-        prev_close = np.roll(close_arr, 1)
-        prev_close[0] = close_arr[0]
-
-        tr = np.maximum.reduce(
+        prev_c = c.shift(1)
+        tr = pd.concat(
             [
-                np.abs(high_arr - low_arr),
-                np.abs(high_arr - prev_close),
-                np.abs(low_arr - prev_close),
-            ]
-        )
+                (h - l).abs(),
+                (h - prev_c).abs(),
+                (l - prev_c).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
 
-        atr = self._ewm_mean(values=tr.tolist(), span=max(1, int(window)))
-        atr_pct: List[float] = []
-        for atr_v, close_v in zip(atr, close_arr.tolist()):
-            if float(close_v) <= 0:
-                atr_pct.append(0.0)
-            else:
-                atr_pct.append(float(atr_v) / float(close_v))
+        atr = tr.ewm(
+            span=max(1, int(window)),
+            adjust=False,
+            min_periods=max(2, int(window) // 2),
+        ).mean()
 
-        return atr, atr_pct
+        atr = atr.replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0)
+        atr_pct = (atr / c.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0)
+
+        return atr.astype(float).tolist(), atr_pct.astype(float).tolist()
+
+    def compute_ma(
+        self,
+        *,
+        values: Sequence[float],
+        window: Optional[int],
+        ma_type: TradeMovingAverageType | str = TradeMovingAverageType.EMA,
+    ) -> List[float]:
+        """
+        Compute EMA or SMA for the whole series.
+
+        When window is None or invalid, the result is a NaN series with the same length.
+        """
+        base = pd.to_numeric(pd.Series(list(values)), errors="coerce").ffill()
+
+        if window is None:
+            return pd.Series(np.nan, index=base.index, dtype=float).tolist()
+
+        w = int(window)
+        if w <= 0:
+            return pd.Series(np.nan, index=base.index, dtype=float).tolist()
+
+        normalized_type = self._normalize_ma_type(ma_type)
+
+        if normalized_type == TradeMovingAverageType.SMA:
+            out = base.rolling(
+                window=w,
+                min_periods=max(1, w // 2),
+            ).mean()
+        else:
+            out = base.ewm(
+                span=w,
+                adjust=False,
+                min_periods=max(1, w // 2),
+            ).mean()
+
+        return out.replace([np.inf, -np.inf], np.nan).tolist()
+
+    def normalize_percentile_input(self, value: Optional[float]) -> Optional[float]:
+        """
+        Normalize percentile input.
+
+        Accepted formats:
+        - 0.2 / 0.6
+        - 20 / 60
+        """
+        if value is None:
+            return None
+
+        q = float(value)
+        if 1.0 < q <= 100.0:
+            q = q / 100.0
+
+        if not (0.0 <= q <= 1.0):
+            raise ValueError("Percentile must be between 0 and 1, or between 0 and 100.")
+
+        return q
+
+    def compute_dynamic_thresholds(
+        self,
+        *,
+        values: Sequence[float],
+        window: int,
+        low_percentile: float,
+        high_percentile: float,
+        min_periods: Optional[int] = None,
+    ) -> Tuple[List[float], List[float]]:
+        """
+        Compute rolling percentile-based thresholds using shifted historical values.
+
+        The base series is shifted by 1 so the current candle never sees its own
+        ATR value when computing the active thresholds.
+        """
+        s = pd.to_numeric(pd.Series(list(values)), errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+        w = int(window)
+        mp = int(min_periods) if min_periods is not None else max(2, w // 2)
+
+        base = s.shift(1)
+
+        low_thr = base.rolling(window=w, min_periods=mp).quantile(float(low_percentile))
+        high_thr = base.rolling(window=w, min_periods=mp).quantile(float(high_percentile))
+
+        low_thr = low_thr.replace([np.inf, -np.inf], np.nan)
+        high_thr = high_thr.replace([np.inf, -np.inf], np.nan)
+
+        return low_thr.tolist(), high_thr.tolist()
 
     def required_bars_for_atr(self, *, atr_window: int) -> int:
         """
@@ -69,23 +156,25 @@ class TradeIndicatorCalculationService:
         """
         return max(3, int(atr_window) + 2)
 
-    def _ewm_mean(self, *, values: Sequence[float], span: int) -> List[float]:
+    def required_bars_for_ma(self, *, ma_window: int) -> int:
         """
-        Compute an exponentially weighted moving average for the full sequence.
+        Return a safe bar count for MA calculations.
         """
-        if not values:
-            return []
+        return max(3, int(ma_window) + 2)
 
-        k = 2.0 / (float(span) + 1.0)
-        out: List[float] = []
-        ema: Optional[float] = None
+    def required_bars_for_dynamic_threshold(self, *, dynamic_window: int) -> int:
+        """
+        Return a safe bar count for dynamic rolling percentiles.
+        """
+        return max(3, int(dynamic_window) + 2)
 
-        for value in values:
-            v = float(value)
-            if ema is None:
-                ema = v
-            else:
-                ema = (v - ema) * k + ema
-            out.append(float(ema))
-
-        return out
+    def _normalize_ma_type(
+        self,
+        value: TradeMovingAverageType | str,
+    ) -> TradeMovingAverageType:
+        """
+        Normalize MA type values into the enum.
+        """
+        if isinstance(value, TradeMovingAverageType):
+            return value
+        return TradeMovingAverageType(str(value).strip().lower())

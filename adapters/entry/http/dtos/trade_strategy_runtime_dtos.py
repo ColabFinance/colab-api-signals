@@ -34,6 +34,10 @@ class TradeStrategyRuntimeSnapshotOutDTO(BaseModel):
     atr_pct: float
     atr_value_for_threshold: float
 
+    atr_threshold_source: str
+    atr_low_threshold_active: Optional[float] = None
+    atr_high_threshold_active: Optional[float] = None
+
     low_atr_hit: int
     high_atr_hit: int
 
@@ -41,6 +45,12 @@ class TradeStrategyRuntimeSnapshotOutDTO(BaseModel):
     setup_reference_price: Optional[float] = None
     desired_side: Optional[str] = None
     position_side: Optional[str] = None
+
+    regime_trend_ma: Optional[float] = None
+    regime_structure_ma: Optional[float] = None
+    regime_allows_long: int = 1
+    regime_allows_short: int = 1
+    regime_allows_desired: Optional[int] = None
 
     entry_reference_price: Optional[float] = None
     open_trade_loss_pct: float = 0.0
