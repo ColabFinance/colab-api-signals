@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
-from adapters.entry.http.dtos.trade_strategy_dtos import TradeStrategyCreateDTO
+from adapters.entry.http.dtos.trade_strategy_dtos import (
+    TradeStrategyCreateDTO,
+    TradeStrategyUpdateDTO,
+)
 from core.domain.entities.trade_strategy_entity import (
     TradeStrategyEntity,
     TradeStrategyParamsEntity,
@@ -51,6 +54,100 @@ class TradeStrategyUseCase:
             params=TradeStrategyParamsEntity(**data.params.model_dump(mode="python")),
         )
         return await self.strategy_repo.create(ent)
+
+    async def update_strategy(
+        self,
+        *,
+        strategy_id: str,
+        data: TradeStrategyUpdateDTO,
+    ) -> Optional[TradeStrategyEntity]:
+        """
+        Partially update one stored trade strategy.
+
+        The incoming payload is merged with the stored document and then
+        fully validated through the canonical entities before persisting.
+        """
+        current = await self.strategy_repo.get_by_id(str(strategy_id))
+        if current is None:
+            return None
+
+        current_raw = current.model_dump(mode="python")
+        current_params_raw = current.params.model_dump(mode="python")
+
+        payload = data.model_dump(mode="python", exclude_none=True)
+        incoming_params_raw = payload.pop("params", None)
+
+        merged_params_raw = dict(current_params_raw)
+        if incoming_params_raw:
+            merged_params_raw.update(incoming_params_raw)
+
+        validated_params = TradeStrategyParamsEntity(**merged_params_raw)
+
+        merged_raw = {
+            "name": current_raw["name"],
+            "symbol": current_raw["symbol"],
+            "source": current_raw["source"],
+            "interval": current_raw["interval"],
+            "stream_key": current_raw["stream_key"],
+            "strategy_type": current_raw["strategy_type"],
+            "status": current_raw["status"],
+            "execution_target": current_raw["execution_target"],
+            "execution_account_id": current_raw.get("execution_account_id"),
+            "params": validated_params,
+        }
+
+        merged_raw.update(payload)
+
+        if merged_raw.get("name") is not None:
+            merged_raw["name"] = str(merged_raw["name"]).strip()
+
+        if merged_raw.get("symbol") is not None:
+            merged_raw["symbol"] = str(merged_raw["symbol"]).strip().upper()
+
+        if merged_raw.get("source") is not None:
+            merged_raw["source"] = str(merged_raw["source"]).strip().lower()
+
+        if merged_raw.get("interval") is not None:
+            merged_raw["interval"] = str(merged_raw["interval"]).strip().lower()
+
+        if merged_raw.get("stream_key") is not None:
+            merged_raw["stream_key"] = str(merged_raw["stream_key"]).strip().lower()
+
+        if merged_raw.get("execution_account_id") is not None:
+            merged_raw["execution_account_id"] = str(merged_raw["execution_account_id"]).strip()
+
+        validated_entity = TradeStrategyEntity(
+            id=current.id,
+            name=merged_raw["name"],
+            symbol=merged_raw["symbol"],
+            source=merged_raw["source"],
+            interval=merged_raw["interval"],
+            stream_key=merged_raw["stream_key"],
+            strategy_type=merged_raw["strategy_type"],
+            status=merged_raw["status"],
+            execution_target=merged_raw["execution_target"],
+            execution_account_id=merged_raw.get("execution_account_id"),
+            params=validated_params,
+            created_at=current.created_at,
+            created_at_iso=current.created_at_iso,
+            updated_at=current.updated_at,
+            updated_at_iso=current.updated_at_iso,
+        )
+
+        update_payload = {
+            "name": validated_entity.name,
+            "symbol": validated_entity.symbol,
+            "source": validated_entity.source,
+            "interval": validated_entity.interval,
+            "stream_key": validated_entity.stream_key,
+            "strategy_type": validated_entity.strategy_type,
+            "status": validated_entity.status,
+            "execution_target": validated_entity.execution_target,
+            "execution_account_id": validated_entity.execution_account_id,
+            "params": validated_entity.params.model_dump(mode="python"),
+        }
+
+        return await self.strategy_repo.update(str(strategy_id), update_payload)
 
     async def get_strategy_by_id(self, *, strategy_id: str) -> Optional[TradeStrategyEntity]:
         """

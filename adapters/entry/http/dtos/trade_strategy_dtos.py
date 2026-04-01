@@ -115,8 +115,8 @@ class TradeStrategyParamsDTO(BaseModel):
             )
 
         if dynamic_enabled:
-            low_q = float(self.atr_dynamic_low_percentile)  # already normalized
-            high_q = float(self.atr_dynamic_high_percentile)  # already normalized
+            low_q = float(self.atr_dynamic_low_percentile)
+            high_q = float(self.atr_dynamic_high_percentile)
             if high_q <= low_q:
                 raise ValueError(
                     "atr_dynamic_high_percentile must be greater than "
@@ -135,6 +135,51 @@ class TradeStrategyParamsDTO(BaseModel):
                 raise ValueError("atr_high_threshold must be greater than atr_low_threshold")
 
         return self
+
+
+class TradeStrategyParamsUpdateDTO(BaseModel):
+    """
+    Partial parameters payload used to update a trade strategy.
+
+    Validation of cross-field consistency is finalized after merging with the
+    currently stored params inside the use case.
+    """
+
+    atr_window: Optional[int] = Field(default=None, ge=1)
+
+    atr_low_threshold: Optional[float] = Field(default=None, gt=0)
+    atr_high_threshold: Optional[float] = Field(default=None, gt=0)
+    atr_threshold_mode: Optional[TradeAtrThresholdMode] = Field(default=None)
+
+    atr_dynamic_window: Optional[int] = Field(default=None, gt=1)
+    atr_dynamic_low_percentile: Optional[float] = Field(default=None)
+    atr_dynamic_high_percentile: Optional[float] = Field(default=None)
+    atr_dynamic_min_periods: Optional[int] = Field(default=None, ge=1)
+
+    regime_trend_ma_window: Optional[int] = Field(default=None, gt=0)
+    regime_trend_ma_type: Optional[TradeMovingAverageType] = Field(default=None)
+
+    regime_structure_ma_window: Optional[int] = Field(default=None, gt=0)
+    regime_structure_ma_type: Optional[TradeMovingAverageType] = Field(default=None)
+
+    regime_reverse: Optional[bool] = Field(default=None)
+
+    cooloff_bars: Optional[int] = Field(default=None, ge=0)
+    trade_mode: Optional[TradeMode] = Field(default=None)
+    reverse_signal: Optional[bool] = Field(default=None)
+    allowed_weekdays: Optional[List[int | str]] = Field(default=None)
+    max_loss_pct: Optional[float] = Field(default=None, gt=0, le=1)
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    @field_validator(
+        "atr_dynamic_low_percentile",
+        "atr_dynamic_high_percentile",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_dynamic_percentiles(cls, v):
+        return _normalize_percentile_input(v)
 
 
 class TradeStrategyCreateDTO(BaseModel):
@@ -184,6 +229,58 @@ class TradeStrategyCreateDTO(BaseModel):
         """
         Normalize lower-like string fields.
         """
+        return str(v).strip().lower()
+
+
+class TradeStrategyUpdateDTO(BaseModel):
+    """
+    DTO used to partially update an existing trade strategy.
+    """
+
+    name: Optional[str] = Field(default=None, min_length=1)
+    symbol: Optional[str] = Field(default=None, min_length=1)
+    source: Optional[str] = Field(default=None, min_length=1)
+    interval: Optional[str] = Field(default=None)
+    stream_key: Optional[str] = Field(default=None, min_length=1)
+
+    strategy_type: Optional[TradeStrategyType] = Field(default=None)
+    status: Optional[TradeStrategyStatus] = Field(default=None)
+
+    execution_target: Optional[TradeExecutionTarget] = Field(default=None)
+    execution_account_id: Optional[str] = None
+
+    params: Optional[TradeStrategyParamsUpdateDTO] = None
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    @field_validator("name", "symbol", "source", "interval", "stream_key", "execution_account_id")
+    @classmethod
+    def _strip_optional_strings(cls, v: Optional[str]) -> Optional[str]:
+        """
+        Normalize optional string values.
+        """
+        if v is None:
+            return None
+        return str(v).strip()
+
+    @field_validator("symbol")
+    @classmethod
+    def _upper_symbol(cls, v: Optional[str]) -> Optional[str]:
+        """
+        Normalize symbol to uppercase.
+        """
+        if v is None:
+            return None
+        return str(v).strip().upper()
+
+    @field_validator("source", "interval", "stream_key")
+    @classmethod
+    def _lower_like_fields(cls, v: Optional[str]) -> Optional[str]:
+        """
+        Normalize lower-like string fields.
+        """
+        if v is None:
+            return None
         return str(v).strip().lower()
 
 

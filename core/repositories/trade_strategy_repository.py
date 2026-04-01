@@ -22,6 +22,12 @@ class TradeStrategyRepository(Protocol):
         """
         raise NotImplementedError
 
+    async def update(self, strategy_id: str, data: Dict[str, Any]) -> Optional[TradeStrategyEntity]:
+        """
+        Update an existing trade strategy and return the stored document.
+        """
+        raise NotImplementedError
+
     async def get_by_id(self, strategy_id: str) -> Optional[TradeStrategyEntity]:
         """
         Fetch a trade strategy by its Mongo identifier.

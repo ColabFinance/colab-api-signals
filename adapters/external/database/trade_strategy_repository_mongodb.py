@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from bson import ObjectId
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -61,6 +61,35 @@ class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
         stored = await self._col.find_one({"_id": res.inserted_id})
         return TradeStrategyEntity.from_mongo(stored)
 
+    async def update(self, strategy_id: str, data: Dict[str, Any]) -> Optional[TradeStrategyEntity]:
+        """
+        Update an existing trade strategy and return the updated document.
+        """
+        now_ms, now_iso = self._now()
+
+        payload = dict(data)
+        payload["updated_at"] = now_ms
+        payload["updated_at_iso"] = now_iso
+
+        result = await self._col.update_one(
+            {"_id": strategy_id},
+            {"$set": payload},
+        )
+        if result.matched_count > 0:
+            return await self.get_by_id(strategy_id)
+
+        try:
+            result = await self._col.update_one(
+                {"_id": ObjectId(strategy_id)},
+                {"$set": payload},
+            )
+            if result.matched_count > 0:
+                return await self.get_by_id(strategy_id)
+        except Exception:
+            pass
+
+        return None
+
     async def get_by_id(self, strategy_id: str) -> Optional[TradeStrategyEntity]:
         """
         Fetch a trade strategy by Mongo identifier.
@@ -70,7 +99,6 @@ class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
             return TradeStrategyEntity.from_mongo(doc)
 
         try:
-            from bson import ObjectId
             doc = await self._col.find_one({"_id": ObjectId(strategy_id)})
             return TradeStrategyEntity.from_mongo(doc) if doc else None
         except Exception:
@@ -125,7 +153,6 @@ class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
             return updated
 
         try:
-            from bson import ObjectId
             await self._col.update_one(
                 {"_id": ObjectId(strategy_id)},
                 {"$set": {"status": normalized_status, "updated_at": now_ms, "updated_at_iso": now_iso}},
@@ -182,7 +209,6 @@ class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
 
         return {"$and": and_conditions}
 
-
     async def list_public(
         self,
         *,
@@ -193,7 +219,7 @@ class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
         search: str | None = None,
         limit: int = 20,
         offset: int = 0,
-    ) -> List[TradeStrategyEntity]: 
+    ) -> List[TradeStrategyEntity]:
         """
         List trade strategies for public user-facing pages with filtering and pagination.
         """
@@ -215,7 +241,6 @@ class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
         docs = await cursor.to_list(length=int(limit))
         return [TradeStrategyEntity.from_mongo(doc) for doc in docs if doc]
 
-
     async def count_public(
         self,
         *,
@@ -236,7 +261,6 @@ class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
             search=search,
         )
         return int(await self._col.count_documents(query))
-
 
     async def get_public_summary(self) -> dict:
         """
@@ -262,7 +286,6 @@ class TradeStrategyRepositoryMongoDB(TradeStrategyRepository):
             "unique_stream_keys": len([item for item in stream_keys if item]),
             "unique_execution_accounts": len([item for item in execution_account_ids if item]),
         }
-
 
     async def list_public_filter_options(self) -> dict:
         """
