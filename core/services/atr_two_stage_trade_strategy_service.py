@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -82,10 +82,12 @@ class AtrTwoStageTradeStrategyService:
         """
         Return the required candle window for evaluating the strategy safely.
 
-        The required window now considers:
+        The required window considers:
         - ATR warmup
         - optional dynamic ATR percentile windows
         - optional regime MA windows
+        - optional entry confirmation windows
+        - optional breakout windows
         - cooloff / operational room
         """
         params = strategy.params
@@ -122,6 +124,15 @@ class AtrTwoStageTradeStrategyService:
                 )
                 + 10,
             )
+
+        if params.entry_confirm_bars is not None:
+            need = max(need, int(params.entry_confirm_bars) + 10)
+
+        if params.entry_break_recent_high_window is not None:
+            need = max(need, int(params.entry_break_recent_high_window) + 10)
+
+        if params.entry_break_recent_low_window is not None:
+            need = max(need, int(params.entry_break_recent_low_window) + 10)
 
         return max(50, int(need))
 
@@ -225,12 +236,40 @@ class AtrTwoStageTradeStrategyService:
             ma_type=params.regime_structure_ma_type,
         )
 
+        if params.entry_break_recent_high_window is not None:
+            high_window = int(params.entry_break_recent_high_window)
+            data["entry_recent_high"] = (
+                data["high"].shift(1).rolling(window=high_window, min_periods=high_window).max()
+            )
+        else:
+            data["entry_recent_high"] = pd.Series(index=data.index, dtype=float)
+
+        if params.entry_break_recent_low_window is not None:
+            low_window = int(params.entry_break_recent_low_window)
+            data["entry_recent_low"] = (
+                data["low"].shift(1).rolling(window=low_window, min_periods=low_window).min()
+            )
+        else:
+            data["entry_recent_low"] = pd.Series(index=data.index, dtype=float)
+
         if previous_snapshot is None:
             indices_to_process = list(range(1, len(data)))
+
             setup_armed = False
             setup_reference_price: Optional[float] = None
+            setup_reference_atr: Optional[float] = None
+            setup_reference_atr_value_for_threshold: Optional[float] = None
+            setup_age_bars = 0
+
             position_side: Optional[TradePositionSide] = None
             entry_reference_price: Optional[float] = None
+            entry_atr: Optional[float] = None
+            entry_atr_value_for_threshold: Optional[float] = None
+            bars_in_trade = 0
+
+            best_favorable_price: Optional[float] = None
+            worst_adverse_price: Optional[float] = None
+
             bars_since_last_event = 1000000
         else:
             previous_ts = int(previous_snapshot.close_time)
@@ -246,12 +285,47 @@ class AtrTwoStageTradeStrategyService:
                 if previous_snapshot.setup_reference_price is not None
                 else None
             )
+            setup_reference_atr = (
+                float(getattr(previous_snapshot, "setup_reference_atr", None))
+                if getattr(previous_snapshot, "setup_reference_atr", None) is not None
+                else None
+            )
+            setup_reference_atr_value_for_threshold = (
+                float(getattr(previous_snapshot, "setup_reference_atr_value_for_threshold", None))
+                if getattr(previous_snapshot, "setup_reference_atr_value_for_threshold", None) is not None
+                else None
+            )
+            setup_age_bars = int(getattr(previous_snapshot, "setup_age_bars", 0) or 0)
+
             position_side = self._normalize_position_side(previous_snapshot.position_side)
             entry_reference_price = (
                 float(previous_snapshot.entry_reference_price)
                 if getattr(previous_snapshot, "entry_reference_price", None) is not None
                 else None
             )
+            entry_atr = (
+                float(getattr(previous_snapshot, "entry_atr", None))
+                if getattr(previous_snapshot, "entry_atr", None) is not None
+                else None
+            )
+            entry_atr_value_for_threshold = (
+                float(getattr(previous_snapshot, "entry_atr_value_for_threshold", None))
+                if getattr(previous_snapshot, "entry_atr_value_for_threshold", None) is not None
+                else None
+            )
+            bars_in_trade = int(getattr(previous_snapshot, "bars_in_trade", 0) or 0)
+
+            best_favorable_price = (
+                float(getattr(previous_snapshot, "best_favorable_price", None))
+                if getattr(previous_snapshot, "best_favorable_price", None) is not None
+                else None
+            )
+            worst_adverse_price = (
+                float(getattr(previous_snapshot, "worst_adverse_price", None))
+                if getattr(previous_snapshot, "worst_adverse_price", None) is not None
+                else None
+            )
+
             bars_since_last_event = int(getattr(previous_snapshot, "bars_since_last_event", 1000000) or 1000000)
 
         if not indices_to_process:
@@ -269,6 +343,16 @@ class AtrTwoStageTradeStrategyService:
 
         for idx in indices_to_process:
             bars_since_last_event += 1
+
+            if position_side is not None:
+                bars_in_trade += 1
+            else:
+                bars_in_trade = 0
+
+            if setup_armed:
+                setup_age_bars += 1
+            else:
+                setup_age_bars = 0
 
             candle_open = float(data.loc[idx, "open"])
             candle_high = float(data.loc[idx, "high"])
@@ -295,6 +379,20 @@ class AtrTwoStageTradeStrategyService:
                 atr_high_threshold_active is not None
                 and atr_value_for_threshold >= float(atr_high_threshold_active)
             )
+
+            setup_expired_now = 0
+            if (
+                position_side is None
+                and setup_armed
+                and params.max_setup_bars is not None
+                and int(setup_age_bars) > int(params.max_setup_bars)
+            ):
+                setup_armed = False
+                setup_reference_price = None
+                setup_reference_atr = None
+                setup_reference_atr_value_for_threshold = None
+                setup_age_bars = 0
+                setup_expired_now = 1
 
             desired_side: Optional[TradePositionSide] = None
             if setup_armed:
@@ -334,6 +432,61 @@ class AtrTwoStageTradeStrategyService:
                 else None
             )
 
+            ref_move_ok = (
+                self._ref_move_ok(
+                    current_price=candle_close,
+                    reference_price=setup_reference_price,
+                    current_atr_abs=atr_now,
+                    min_ref_move_atr_mult=params.min_ref_move_atr_mult,
+                )
+                if desired_side is not None
+                else None
+            )
+
+            entry_confirm_ok = (
+                self._entry_confirmation_ok(
+                    idx=idx,
+                    closes=data["close"],
+                    side=desired_side,
+                    reference_price=setup_reference_price,
+                    setup_age_bars=setup_age_bars,
+                    confirm_bars=params.entry_confirm_bars,
+                )
+                if desired_side is not None
+                else None
+            )
+
+            entry_breakout_ok = (
+                self._entry_breakout_ok(
+                    idx=idx,
+                    side=desired_side,
+                    current_price=candle_close,
+                    recent_high_series=data["entry_recent_high"],
+                    recent_low_series=data["entry_recent_low"],
+                    strategy=strategy,
+                )
+                if desired_side is not None
+                else None
+            )
+
+            atr_expansion_ok = (
+                self._atr_expansion_ok(
+                    current_atr_value=atr_value_for_threshold,
+                    setup_reference_atr_value=setup_reference_atr_value_for_threshold,
+                    min_atr_expansion_ratio=params.min_atr_expansion_ratio,
+                )
+                if setup_armed
+                else None
+            )
+
+            if position_side is not None:
+                best_favorable_price, worst_adverse_price = self._update_trade_extremes(
+                    position_side=position_side,
+                    current_price=candle_close,
+                    best_favorable_price=best_favorable_price,
+                    worst_adverse_price=worst_adverse_price,
+                )
+
             open_trade_loss_pct_before_event = self._compute_open_trade_loss_pct(
                 position_side=position_side,
                 entry_reference_price=entry_reference_price,
@@ -343,12 +496,83 @@ class AtrTwoStageTradeStrategyService:
             can_fire = int(bars_since_last_event) > int(max(0, params.cooloff_bars))
             is_allowed_day = self._is_allowed_day(candle_close_time, allowed_days)
 
+            trailing_active_now = (
+                self._trailing_is_active(
+                    position_side=position_side,
+                    entry_reference_price=entry_reference_price,
+                    entry_atr=entry_atr,
+                    best_favorable_price=best_favorable_price,
+                    strategy=strategy,
+                )
+                if position_side is not None
+                else False
+            )
+
+            stop_loss_atr_hit = (
+                self._stop_loss_hit(
+                    position_side=position_side,
+                    entry_reference_price=entry_reference_price,
+                    entry_atr=entry_atr,
+                    current_price=candle_close,
+                    strategy=strategy,
+                )
+                if position_side is not None
+                else False
+            )
+
+            take_profit_atr_hit = (
+                self._take_profit_hit(
+                    position_side=position_side,
+                    entry_reference_price=entry_reference_price,
+                    entry_atr=entry_atr,
+                    current_price=candle_close,
+                    strategy=strategy,
+                )
+                if position_side is not None
+                else False
+            )
+
+            trailing_stop_atr_hit = (
+                self._trailing_stop_hit(
+                    position_side=position_side,
+                    entry_atr=entry_atr,
+                    current_price=candle_close,
+                    best_favorable_price=best_favorable_price,
+                    entry_reference_price=entry_reference_price,
+                    strategy=strategy,
+                )
+                if position_side is not None
+                else False
+            )
+
+            timeout_exit_hit = (
+                self._timeout_exit_hit(
+                    bars_in_trade=bars_in_trade,
+                    strategy=strategy,
+                    position_side=position_side,
+                )
+                if position_side is not None
+                else False
+            )
+
+            regime_flip_exit_hit = (
+                self._regime_flip_exit_hit(
+                    position_side=position_side,
+                    price=candle_close,
+                    trend_ma_value=regime_trend_ma_now,
+                    structure_ma_value=regime_structure_ma_now,
+                    strategy=strategy,
+                )
+                if position_side is not None
+                else False
+            )
+
             signal_up = 0
             signal_down = 0
             signal_up_first = 0
             signal_down_first = 0
             exit_signal = 0
-            event: Optional[TradeEvent] = None
+            event: Optional[TradeEvent] = TradeEvent.SETUP_EXPIRED if setup_expired_now else None
             signal_for_candle: Optional[Dict[str, Any]] = None
 
             if position_side is not None:
@@ -359,22 +583,28 @@ class AtrTwoStageTradeStrategyService:
                 ):
                     closed_side = position_side
                     closed_entry_reference_price = entry_reference_price
+                    closed_entry_atr = entry_atr
+                    closed_entry_atr_value_for_threshold = entry_atr_value_for_threshold
 
                     exit_signal = 1
                     event = TradeEvent.MAX_LOSS_STOP
 
                     position_side = None
                     entry_reference_price = None
+                    entry_atr = None
+                    entry_atr_value_for_threshold = None
+                    bars_in_trade = 0
+                    best_favorable_price = None
+                    worst_adverse_price = None
+
                     setup_armed = False
                     setup_reference_price = None
+                    setup_reference_atr = None
+                    setup_reference_atr_value_for_threshold = None
+                    setup_age_bars = 0
                     bars_since_last_event = 0
 
-                    if closed_side == TradePositionSide.LONG:
-                        close_signal_type = TradeSignalType.CLOSE_LONG
-                    elif closed_side == TradePositionSide.SHORT:
-                        close_signal_type = TradeSignalType.CLOSE_SHORT
-                    else:
-                        close_signal_type = TradeSignalType.CLOSE_POSITION
+                    close_signal_type = self._close_signal_type_from_side(closed_side)
 
                     signal_for_candle = {
                         "signal_type": close_signal_type,
@@ -392,7 +622,299 @@ class AtrTwoStageTradeStrategyService:
                         "regime_structure_ma": regime_structure_ma_now,
                         "regime_allows_desired": regime_allows_desired,
                         "setup_reference_price": setup_reference_price,
+                        "setup_reference_atr": setup_reference_atr,
+                        "setup_reference_atr_value_for_threshold": setup_reference_atr_value_for_threshold,
+                        "setup_age_bars": setup_age_bars,
                         "entry_reference_price": closed_entry_reference_price,
+                        "entry_atr": closed_entry_atr,
+                        "entry_atr_value_for_threshold": closed_entry_atr_value_for_threshold,
+                        "bars_in_trade": bars_in_trade,
+                        "trailing_active": False,
+                        "open_trade_loss_pct": float(open_trade_loss_pct_before_event),
+                        "runtime_state": self._resolve_runtime_state(
+                            setup_armed=setup_armed,
+                            position_side=position_side,
+                        ),
+                    }
+
+                elif stop_loss_atr_hit and can_fire:
+                    closed_side = position_side
+                    closed_entry_reference_price = entry_reference_price
+                    closed_entry_atr = entry_atr
+                    closed_entry_atr_value_for_threshold = entry_atr_value_for_threshold
+
+                    exit_signal = 1
+                    event = TradeEvent.ATR_STOP_LOSS
+
+                    position_side = None
+                    entry_reference_price = None
+                    entry_atr = None
+                    entry_atr_value_for_threshold = None
+                    bars_in_trade = 0
+                    best_favorable_price = None
+                    worst_adverse_price = None
+
+                    setup_armed = False
+                    setup_reference_price = None
+                    setup_reference_atr = None
+                    setup_reference_atr_value_for_threshold = None
+                    setup_age_bars = 0
+                    bars_since_last_event = 0
+
+                    close_signal_type = self._close_signal_type_from_side(closed_side)
+
+                    signal_for_candle = {
+                        "signal_type": close_signal_type,
+                        "ts": candle_close_time,
+                        "close": candle_close,
+                        "event": event,
+                        "position_side": closed_side,
+                        "desired_side": desired_side,
+                        "atr": atr_now,
+                        "atr_pct": atr_pct_now,
+                        "atr_threshold_source": atr_threshold_source,
+                        "atr_low_threshold_active": atr_low_threshold_active,
+                        "atr_high_threshold_active": atr_high_threshold_active,
+                        "regime_trend_ma": regime_trend_ma_now,
+                        "regime_structure_ma": regime_structure_ma_now,
+                        "regime_allows_desired": regime_allows_desired,
+                        "setup_reference_price": setup_reference_price,
+                        "setup_reference_atr": setup_reference_atr,
+                        "setup_reference_atr_value_for_threshold": setup_reference_atr_value_for_threshold,
+                        "setup_age_bars": setup_age_bars,
+                        "entry_reference_price": closed_entry_reference_price,
+                        "entry_atr": closed_entry_atr,
+                        "entry_atr_value_for_threshold": closed_entry_atr_value_for_threshold,
+                        "bars_in_trade": bars_in_trade,
+                        "trailing_active": False,
+                        "open_trade_loss_pct": float(open_trade_loss_pct_before_event),
+                        "runtime_state": self._resolve_runtime_state(
+                            setup_armed=setup_armed,
+                            position_side=position_side,
+                        ),
+                    }
+
+                elif take_profit_atr_hit and can_fire:
+                    closed_side = position_side
+                    closed_entry_reference_price = entry_reference_price
+                    closed_entry_atr = entry_atr
+                    closed_entry_atr_value_for_threshold = entry_atr_value_for_threshold
+
+                    exit_signal = 1
+                    event = TradeEvent.ATR_TAKE_PROFIT
+
+                    position_side = None
+                    entry_reference_price = None
+                    entry_atr = None
+                    entry_atr_value_for_threshold = None
+                    bars_in_trade = 0
+                    best_favorable_price = None
+                    worst_adverse_price = None
+
+                    setup_armed = False
+                    setup_reference_price = None
+                    setup_reference_atr = None
+                    setup_reference_atr_value_for_threshold = None
+                    setup_age_bars = 0
+                    bars_since_last_event = 0
+
+                    close_signal_type = self._close_signal_type_from_side(closed_side)
+
+                    signal_for_candle = {
+                        "signal_type": close_signal_type,
+                        "ts": candle_close_time,
+                        "close": candle_close,
+                        "event": event,
+                        "position_side": closed_side,
+                        "desired_side": desired_side,
+                        "atr": atr_now,
+                        "atr_pct": atr_pct_now,
+                        "atr_threshold_source": atr_threshold_source,
+                        "atr_low_threshold_active": atr_low_threshold_active,
+                        "atr_high_threshold_active": atr_high_threshold_active,
+                        "regime_trend_ma": regime_trend_ma_now,
+                        "regime_structure_ma": regime_structure_ma_now,
+                        "regime_allows_desired": regime_allows_desired,
+                        "setup_reference_price": setup_reference_price,
+                        "setup_reference_atr": setup_reference_atr,
+                        "setup_reference_atr_value_for_threshold": setup_reference_atr_value_for_threshold,
+                        "setup_age_bars": setup_age_bars,
+                        "entry_reference_price": closed_entry_reference_price,
+                        "entry_atr": closed_entry_atr,
+                        "entry_atr_value_for_threshold": closed_entry_atr_value_for_threshold,
+                        "bars_in_trade": bars_in_trade,
+                        "trailing_active": False,
+                        "open_trade_loss_pct": float(open_trade_loss_pct_before_event),
+                        "runtime_state": self._resolve_runtime_state(
+                            setup_armed=setup_armed,
+                            position_side=position_side,
+                        ),
+                    }
+
+                elif trailing_stop_atr_hit and can_fire:
+                    closed_side = position_side
+                    closed_entry_reference_price = entry_reference_price
+                    closed_entry_atr = entry_atr
+                    closed_entry_atr_value_for_threshold = entry_atr_value_for_threshold
+
+                    exit_signal = 1
+                    event = TradeEvent.ATR_TRAILING_STOP
+
+                    position_side = None
+                    entry_reference_price = None
+                    entry_atr = None
+                    entry_atr_value_for_threshold = None
+                    bars_in_trade = 0
+                    best_favorable_price = None
+                    worst_adverse_price = None
+
+                    setup_armed = False
+                    setup_reference_price = None
+                    setup_reference_atr = None
+                    setup_reference_atr_value_for_threshold = None
+                    setup_age_bars = 0
+                    bars_since_last_event = 0
+
+                    close_signal_type = self._close_signal_type_from_side(closed_side)
+
+                    signal_for_candle = {
+                        "signal_type": close_signal_type,
+                        "ts": candle_close_time,
+                        "close": candle_close,
+                        "event": event,
+                        "position_side": closed_side,
+                        "desired_side": desired_side,
+                        "atr": atr_now,
+                        "atr_pct": atr_pct_now,
+                        "atr_threshold_source": atr_threshold_source,
+                        "atr_low_threshold_active": atr_low_threshold_active,
+                        "atr_high_threshold_active": atr_high_threshold_active,
+                        "regime_trend_ma": regime_trend_ma_now,
+                        "regime_structure_ma": regime_structure_ma_now,
+                        "regime_allows_desired": regime_allows_desired,
+                        "setup_reference_price": setup_reference_price,
+                        "setup_reference_atr": setup_reference_atr,
+                        "setup_reference_atr_value_for_threshold": setup_reference_atr_value_for_threshold,
+                        "setup_age_bars": setup_age_bars,
+                        "entry_reference_price": closed_entry_reference_price,
+                        "entry_atr": closed_entry_atr,
+                        "entry_atr_value_for_threshold": closed_entry_atr_value_for_threshold,
+                        "bars_in_trade": bars_in_trade,
+                        "trailing_active": False,
+                        "open_trade_loss_pct": float(open_trade_loss_pct_before_event),
+                        "runtime_state": self._resolve_runtime_state(
+                            setup_armed=setup_armed,
+                            position_side=position_side,
+                        ),
+                    }
+
+                elif timeout_exit_hit and can_fire:
+                    closed_side = position_side
+                    closed_entry_reference_price = entry_reference_price
+                    closed_entry_atr = entry_atr
+                    closed_entry_atr_value_for_threshold = entry_atr_value_for_threshold
+
+                    exit_signal = 1
+                    event = TradeEvent.MAX_BARS_EXIT
+
+                    position_side = None
+                    entry_reference_price = None
+                    entry_atr = None
+                    entry_atr_value_for_threshold = None
+                    bars_in_trade = 0
+                    best_favorable_price = None
+                    worst_adverse_price = None
+
+                    setup_armed = False
+                    setup_reference_price = None
+                    setup_reference_atr = None
+                    setup_reference_atr_value_for_threshold = None
+                    setup_age_bars = 0
+                    bars_since_last_event = 0
+
+                    close_signal_type = self._close_signal_type_from_side(closed_side)
+
+                    signal_for_candle = {
+                        "signal_type": close_signal_type,
+                        "ts": candle_close_time,
+                        "close": candle_close,
+                        "event": event,
+                        "position_side": closed_side,
+                        "desired_side": desired_side,
+                        "atr": atr_now,
+                        "atr_pct": atr_pct_now,
+                        "atr_threshold_source": atr_threshold_source,
+                        "atr_low_threshold_active": atr_low_threshold_active,
+                        "atr_high_threshold_active": atr_high_threshold_active,
+                        "regime_trend_ma": regime_trend_ma_now,
+                        "regime_structure_ma": regime_structure_ma_now,
+                        "regime_allows_desired": regime_allows_desired,
+                        "setup_reference_price": setup_reference_price,
+                        "setup_reference_atr": setup_reference_atr,
+                        "setup_reference_atr_value_for_threshold": setup_reference_atr_value_for_threshold,
+                        "setup_age_bars": setup_age_bars,
+                        "entry_reference_price": closed_entry_reference_price,
+                        "entry_atr": closed_entry_atr,
+                        "entry_atr_value_for_threshold": closed_entry_atr_value_for_threshold,
+                        "bars_in_trade": bars_in_trade,
+                        "trailing_active": False,
+                        "open_trade_loss_pct": float(open_trade_loss_pct_before_event),
+                        "runtime_state": self._resolve_runtime_state(
+                            setup_armed=setup_armed,
+                            position_side=position_side,
+                        ),
+                    }
+
+                elif regime_flip_exit_hit and can_fire:
+                    closed_side = position_side
+                    closed_entry_reference_price = entry_reference_price
+                    closed_entry_atr = entry_atr
+                    closed_entry_atr_value_for_threshold = entry_atr_value_for_threshold
+
+                    exit_signal = 1
+                    event = TradeEvent.REGIME_FLIP_EXIT
+
+                    position_side = None
+                    entry_reference_price = None
+                    entry_atr = None
+                    entry_atr_value_for_threshold = None
+                    bars_in_trade = 0
+                    best_favorable_price = None
+                    worst_adverse_price = None
+
+                    setup_armed = False
+                    setup_reference_price = None
+                    setup_reference_atr = None
+                    setup_reference_atr_value_for_threshold = None
+                    setup_age_bars = 0
+                    bars_since_last_event = 0
+
+                    close_signal_type = self._close_signal_type_from_side(closed_side)
+
+                    signal_for_candle = {
+                        "signal_type": close_signal_type,
+                        "ts": candle_close_time,
+                        "close": candle_close,
+                        "event": event,
+                        "position_side": closed_side,
+                        "desired_side": desired_side,
+                        "atr": atr_now,
+                        "atr_pct": atr_pct_now,
+                        "atr_threshold_source": atr_threshold_source,
+                        "atr_low_threshold_active": atr_low_threshold_active,
+                        "atr_high_threshold_active": atr_high_threshold_active,
+                        "regime_trend_ma": regime_trend_ma_now,
+                        "regime_structure_ma": regime_structure_ma_now,
+                        "regime_allows_desired": regime_allows_desired,
+                        "setup_reference_price": setup_reference_price,
+                        "setup_reference_atr": setup_reference_atr,
+                        "setup_reference_atr_value_for_threshold": setup_reference_atr_value_for_threshold,
+                        "setup_age_bars": setup_age_bars,
+                        "entry_reference_price": closed_entry_reference_price,
+                        "entry_atr": closed_entry_atr,
+                        "entry_atr_value_for_threshold": closed_entry_atr_value_for_threshold,
+                        "bars_in_trade": bars_in_trade,
+                        "trailing_active": False,
                         "open_trade_loss_pct": float(open_trade_loss_pct_before_event),
                         "runtime_state": self._resolve_runtime_state(
                             setup_armed=setup_armed,
@@ -403,22 +925,28 @@ class AtrTwoStageTradeStrategyService:
                 elif low_atr_hit and can_fire:
                     closed_side = position_side
                     closed_entry_reference_price = entry_reference_price
+                    closed_entry_atr = entry_atr
+                    closed_entry_atr_value_for_threshold = entry_atr_value_for_threshold
 
                     exit_signal = 1
                     event = TradeEvent.ATR_LOW_EXIT
 
                     position_side = None
                     entry_reference_price = None
+                    entry_atr = None
+                    entry_atr_value_for_threshold = None
+                    bars_in_trade = 0
+                    best_favorable_price = None
+                    worst_adverse_price = None
+
                     setup_armed = True
                     setup_reference_price = candle_close
+                    setup_reference_atr = atr_now
+                    setup_reference_atr_value_for_threshold = atr_value_for_threshold
+                    setup_age_bars = 0
                     bars_since_last_event = 0
 
-                    if closed_side == TradePositionSide.LONG:
-                        close_signal_type = TradeSignalType.CLOSE_LONG
-                    elif closed_side == TradePositionSide.SHORT:
-                        close_signal_type = TradeSignalType.CLOSE_SHORT
-                    else:
-                        close_signal_type = TradeSignalType.CLOSE_POSITION
+                    close_signal_type = self._close_signal_type_from_side(closed_side)
 
                     signal_for_candle = {
                         "signal_type": close_signal_type,
@@ -436,7 +964,14 @@ class AtrTwoStageTradeStrategyService:
                         "regime_structure_ma": regime_structure_ma_now,
                         "regime_allows_desired": regime_allows_desired,
                         "setup_reference_price": setup_reference_price,
+                        "setup_reference_atr": setup_reference_atr,
+                        "setup_reference_atr_value_for_threshold": setup_reference_atr_value_for_threshold,
+                        "setup_age_bars": setup_age_bars,
                         "entry_reference_price": closed_entry_reference_price,
+                        "entry_atr": closed_entry_atr,
+                        "entry_atr_value_for_threshold": closed_entry_atr_value_for_threshold,
+                        "bars_in_trade": bars_in_trade,
+                        "trailing_active": False,
                         "open_trade_loss_pct": float(open_trade_loss_pct_before_event),
                         "runtime_state": self._resolve_runtime_state(
                             setup_armed=setup_armed,
@@ -448,6 +983,9 @@ class AtrTwoStageTradeStrategyService:
                 if low_atr_hit:
                     setup_armed = True
                     setup_reference_price = candle_close
+                    setup_reference_atr = atr_now
+                    setup_reference_atr_value_for_threshold = atr_value_for_threshold
+                    setup_age_bars = 0
                     event = TradeEvent.ARM_ON_LOW_ATR
 
                 elif setup_armed and high_atr_hit and desired_side is not None and is_allowed_day and can_fire:
@@ -456,6 +994,30 @@ class AtrTwoStageTradeStrategyService:
                             TradeEvent.REGIME_BLOCKED_LONG
                             if desired_side == TradePositionSide.LONG
                             else TradeEvent.REGIME_BLOCKED_SHORT
+                        )
+                    elif not bool(ref_move_ok):
+                        event = (
+                            TradeEvent.REF_MOVE_BLOCKED_LONG
+                            if desired_side == TradePositionSide.LONG
+                            else TradeEvent.REF_MOVE_BLOCKED_SHORT
+                        )
+                    elif not bool(entry_confirm_ok):
+                        event = (
+                            TradeEvent.ENTRY_CONFIRM_BLOCKED_LONG
+                            if desired_side == TradePositionSide.LONG
+                            else TradeEvent.ENTRY_CONFIRM_BLOCKED_SHORT
+                        )
+                    elif not bool(entry_breakout_ok):
+                        event = (
+                            TradeEvent.ENTRY_BREAKOUT_BLOCKED_LONG
+                            if desired_side == TradePositionSide.LONG
+                            else TradeEvent.ENTRY_BREAKOUT_BLOCKED_SHORT
+                        )
+                    elif not bool(atr_expansion_ok):
+                        event = (
+                            TradeEvent.ATR_EXPANSION_BLOCKED_LONG
+                            if desired_side == TradePositionSide.LONG
+                            else TradeEvent.ATR_EXPANSION_BLOCKED_SHORT
                         )
                     else:
                         opened_side = desired_side
@@ -471,8 +1033,17 @@ class AtrTwoStageTradeStrategyService:
 
                         position_side = opened_side
                         entry_reference_price = candle_close
+                        entry_atr = atr_now
+                        entry_atr_value_for_threshold = atr_value_for_threshold
+                        bars_in_trade = 0
+                        best_favorable_price = candle_close
+                        worst_adverse_price = candle_close
+
                         setup_armed = False
                         setup_reference_price = None
+                        setup_reference_atr = None
+                        setup_reference_atr_value_for_threshold = None
+                        setup_age_bars = 0
                         bars_since_last_event = 0
 
                         signal_for_candle = {
@@ -491,7 +1062,14 @@ class AtrTwoStageTradeStrategyService:
                             "regime_structure_ma": regime_structure_ma_now,
                             "regime_allows_desired": regime_allows_desired,
                             "setup_reference_price": setup_reference_price,
+                            "setup_reference_atr": setup_reference_atr,
+                            "setup_reference_atr_value_for_threshold": setup_reference_atr_value_for_threshold,
+                            "setup_age_bars": setup_age_bars,
                             "entry_reference_price": entry_reference_price,
+                            "entry_atr": entry_atr,
+                            "entry_atr_value_for_threshold": entry_atr_value_for_threshold,
+                            "bars_in_trade": bars_in_trade,
+                            "trailing_active": False,
                             "open_trade_loss_pct": 0.0,
                             "runtime_state": self._resolve_runtime_state(
                                 setup_armed=setup_armed,
@@ -503,6 +1081,18 @@ class AtrTwoStageTradeStrategyService:
                 position_side=position_side,
                 entry_reference_price=entry_reference_price,
                 current_price=candle_close,
+            )
+
+            runtime_trailing_active = (
+                self._trailing_is_active(
+                    position_side=position_side,
+                    entry_reference_price=entry_reference_price,
+                    entry_atr=entry_atr,
+                    best_favorable_price=best_favorable_price,
+                    strategy=strategy,
+                )
+                if position_side is not None
+                else False
             )
 
             runtime_state = self._resolve_runtime_state(
@@ -536,6 +1126,9 @@ class AtrTwoStageTradeStrategyService:
                 "high_atr_hit": int(high_atr_hit),
                 "setup_armed": int(setup_armed),
                 "setup_reference_price": setup_reference_price,
+                "setup_reference_atr": setup_reference_atr,
+                "setup_reference_atr_value_for_threshold": setup_reference_atr_value_for_threshold,
+                "setup_age_bars": int(setup_age_bars),
                 "desired_side": desired_side,
                 "position_side": position_side,
                 "regime_trend_ma": regime_trend_ma_now,
@@ -547,8 +1140,24 @@ class AtrTwoStageTradeStrategyService:
                     if regime_allows_desired is not None
                     else None
                 ),
+                "ref_move_ok": int(ref_move_ok) if ref_move_ok is not None else None,
+                "entry_confirm_ok": int(entry_confirm_ok) if entry_confirm_ok is not None else None,
+                "entry_breakout_ok": int(entry_breakout_ok) if entry_breakout_ok is not None else None,
+                "atr_expansion_ok": int(atr_expansion_ok) if atr_expansion_ok is not None else None,
                 "entry_reference_price": entry_reference_price,
+                "entry_atr": entry_atr,
+                "entry_atr_value_for_threshold": entry_atr_value_for_threshold,
+                "bars_in_trade": int(bars_in_trade),
+                "best_favorable_price": best_favorable_price,
+                "worst_adverse_price": worst_adverse_price,
+                "trailing_active": int(runtime_trailing_active),
                 "open_trade_loss_pct": float(runtime_open_trade_loss_pct),
+                "setup_expired_now": int(setup_expired_now),
+                "stop_loss_atr_hit": int(stop_loss_atr_hit),
+                "take_profit_atr_hit": int(take_profit_atr_hit),
+                "trailing_stop_atr_hit": int(trailing_stop_atr_hit),
+                "timeout_exit_hit": int(timeout_exit_hit),
+                "regime_flip_exit_hit": int(regime_flip_exit_hit),
                 "event": event,
                 "signal_up": int(signal_up),
                 "signal_down": int(signal_down),
@@ -579,6 +1188,16 @@ class AtrTwoStageTradeStrategyService:
             params.atr_dynamic_high_percentile,
         ]
         return all(x is not None for x in dynamic_core)
+
+    def _has_regime_filters(self, strategy: TradeStrategyEntity) -> bool:
+        """
+        Check whether any regime MA filter is configured.
+        """
+        params = strategy.params
+        return bool(
+            params.regime_trend_ma_window is not None
+            or params.regime_structure_ma_window is not None
+        )
 
     def _resolve_desired_side(
         self,
@@ -681,6 +1300,331 @@ class AtrTwoStageTradeStrategyService:
             )
 
         return bool(trend_ok and structure_ok)
+
+    def _ref_move_ok(
+        self,
+        *,
+        current_price: float,
+        reference_price: Optional[float],
+        current_atr_abs: Optional[float],
+        min_ref_move_atr_mult: Optional[float],
+    ) -> bool:
+        """
+        Check the optional minimum distance from setup reference using ATR absolute.
+        """
+        if min_ref_move_atr_mult is None:
+            return True
+        if reference_price is None:
+            return False
+        if current_atr_abs is None or float(current_atr_abs) <= 0.0:
+            return False
+
+        min_dist = float(min_ref_move_atr_mult) * float(current_atr_abs)
+        return abs(float(current_price) - float(reference_price)) >= float(min_dist)
+
+    def _entry_confirmation_ok(
+        self,
+        *,
+        idx: int,
+        closes: pd.Series,
+        side: Optional[TradePositionSide],
+        reference_price: Optional[float],
+        setup_age_bars: int,
+        confirm_bars: Optional[int],
+    ) -> bool:
+        """
+        Check the optional multi-bar confirmation over the setup reference price.
+        """
+        if confirm_bars is None or int(confirm_bars) <= 1:
+            return True
+        if side is None or reference_price is None:
+            return False
+
+        n = int(confirm_bars)
+        if int(setup_age_bars) < n:
+            return False
+        if idx - n + 1 < 0:
+            return False
+
+        window = closes.iloc[idx - n + 1: idx + 1]
+        if len(window) < n:
+            return False
+
+        ref = float(reference_price)
+        if side == TradePositionSide.LONG:
+            return bool((window > ref).all())
+        return bool((window < ref).all())
+
+    def _entry_breakout_ok(
+        self,
+        *,
+        idx: int,
+        side: Optional[TradePositionSide],
+        current_price: float,
+        recent_high_series: pd.Series,
+        recent_low_series: pd.Series,
+        strategy: TradeStrategyEntity,
+    ) -> bool:
+        """
+        Check optional recent-high / recent-low breakout filters.
+        """
+        if side == TradePositionSide.LONG:
+            if strategy.params.entry_break_recent_high_window is None:
+                return True
+            ref_high = recent_high_series.iloc[idx]
+            if pd.isna(ref_high):
+                return False
+            return float(current_price) > float(ref_high)
+
+        if side == TradePositionSide.SHORT:
+            if strategy.params.entry_break_recent_low_window is None:
+                return True
+            ref_low = recent_low_series.iloc[idx]
+            if pd.isna(ref_low):
+                return False
+            return float(current_price) < float(ref_low)
+
+        return False
+
+    def _atr_expansion_ok(
+        self,
+        *,
+        current_atr_value: Optional[float],
+        setup_reference_atr_value: Optional[float],
+        min_atr_expansion_ratio: Optional[float],
+    ) -> bool:
+        """
+        Check the optional ATR expansion filter against the setup-armed candle.
+        """
+        if min_atr_expansion_ratio is None:
+            return True
+        if current_atr_value is None or setup_reference_atr_value is None:
+            return False
+        if float(setup_reference_atr_value) <= 0.0:
+            return False
+
+        ratio = float(current_atr_value) / float(setup_reference_atr_value)
+        return ratio >= float(min_atr_expansion_ratio)
+
+    def _update_trade_extremes(
+        self,
+        *,
+        position_side: Optional[TradePositionSide],
+        current_price: float,
+        best_favorable_price: Optional[float],
+        worst_adverse_price: Optional[float],
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Update the favorable and adverse extremes of the currently open trade.
+        """
+        if position_side is None:
+            return best_favorable_price, worst_adverse_price
+
+        p = float(current_price)
+
+        if position_side == TradePositionSide.LONG:
+            if best_favorable_price is None:
+                best_favorable_price = p
+            else:
+                best_favorable_price = float(max(best_favorable_price, p))
+
+            if worst_adverse_price is None:
+                worst_adverse_price = p
+            else:
+                worst_adverse_price = float(min(worst_adverse_price, p))
+            return best_favorable_price, worst_adverse_price
+
+        if best_favorable_price is None:
+            best_favorable_price = p
+        else:
+            best_favorable_price = float(min(best_favorable_price, p))
+
+        if worst_adverse_price is None:
+            worst_adverse_price = p
+        else:
+            worst_adverse_price = float(max(worst_adverse_price, p))
+
+        return best_favorable_price, worst_adverse_price
+
+    def _stop_loss_hit(
+        self,
+        *,
+        position_side: Optional[TradePositionSide],
+        entry_reference_price: Optional[float],
+        entry_atr: Optional[float],
+        current_price: float,
+        strategy: TradeStrategyEntity,
+    ) -> bool:
+        """
+        Check optional ATR-based stop-loss exit.
+        """
+        mult = strategy.params.stop_loss_atr_mult
+        if mult is None:
+            return False
+        if position_side is None or entry_reference_price is None or entry_atr is None:
+            return False
+
+        dist = float(mult) * float(entry_atr)
+
+        if position_side == TradePositionSide.LONG:
+            return float(current_price) <= float(entry_reference_price) - dist
+        return float(current_price) >= float(entry_reference_price) + dist
+
+    def _take_profit_hit(
+        self,
+        *,
+        position_side: Optional[TradePositionSide],
+        entry_reference_price: Optional[float],
+        entry_atr: Optional[float],
+        current_price: float,
+        strategy: TradeStrategyEntity,
+    ) -> bool:
+        """
+        Check optional ATR-based take-profit exit.
+        """
+        mult = strategy.params.take_profit_atr_mult
+        if mult is None:
+            return False
+        if position_side is None or entry_reference_price is None or entry_atr is None:
+            return False
+
+        dist = float(mult) * float(entry_atr)
+
+        if position_side == TradePositionSide.LONG:
+            return float(current_price) >= float(entry_reference_price) + dist
+        return float(current_price) <= float(entry_reference_price) - dist
+
+    def _trailing_is_active(
+        self,
+        *,
+        position_side: Optional[TradePositionSide],
+        entry_reference_price: Optional[float],
+        entry_atr: Optional[float],
+        best_favorable_price: Optional[float],
+        strategy: TradeStrategyEntity,
+    ) -> bool:
+        """
+        Check whether the optional trailing-stop logic is already active.
+        """
+        params = strategy.params
+
+        if params.trailing_stop_atr_mult is None:
+            return False
+        if position_side is None or entry_reference_price is None or entry_atr is None:
+            return False
+
+        if params.trailing_activation_atr_mult is None:
+            return True
+
+        if best_favorable_price is None:
+            return False
+
+        activation_dist = float(params.trailing_activation_atr_mult) * float(entry_atr)
+
+        if position_side == TradePositionSide.LONG:
+            return float(best_favorable_price) >= float(entry_reference_price) + activation_dist
+
+        return float(best_favorable_price) <= float(entry_reference_price) - activation_dist
+
+    def _trailing_stop_hit(
+        self,
+        *,
+        position_side: Optional[TradePositionSide],
+        entry_reference_price: Optional[float],
+        entry_atr: Optional[float],
+        current_price: float,
+        best_favorable_price: Optional[float],
+        strategy: TradeStrategyEntity,
+    ) -> bool:
+        """
+        Check optional ATR-based trailing-stop exit.
+        """
+        params = strategy.params
+
+        if params.trailing_stop_atr_mult is None:
+            return False
+        if position_side is None or entry_reference_price is None or entry_atr is None:
+            return False
+        if not self._trailing_is_active(
+            position_side=position_side,
+            entry_reference_price=entry_reference_price,
+            entry_atr=entry_atr,
+            best_favorable_price=best_favorable_price,
+            strategy=strategy,
+        ):
+            return False
+        if best_favorable_price is None:
+            return False
+
+        dist = float(params.trailing_stop_atr_mult) * float(entry_atr)
+
+        if position_side == TradePositionSide.LONG:
+            stop_price = float(best_favorable_price) - dist
+            return float(current_price) <= stop_price
+
+        stop_price = float(best_favorable_price) + dist
+        return float(current_price) >= stop_price
+
+    def _timeout_exit_hit(
+        self,
+        *,
+        bars_in_trade: int,
+        strategy: TradeStrategyEntity,
+        position_side: Optional[TradePositionSide],
+    ) -> bool:
+        """
+        Check optional max-bars-in-trade exit.
+        """
+        if position_side is None:
+            return False
+        if strategy.params.max_bars_in_trade is None:
+            return False
+        return int(bars_in_trade) >= int(strategy.params.max_bars_in_trade)
+
+    def _regime_flip_exit_hit(
+        self,
+        *,
+        position_side: Optional[TradePositionSide],
+        price: float,
+        trend_ma_value: Optional[float],
+        structure_ma_value: Optional[float],
+        strategy: TradeStrategyEntity,
+    ) -> bool:
+        """
+        Check optional regime-flip exit.
+
+        This only matters when:
+        - there is an open position
+        - exit_on_regime_flip is enabled
+        - at least one regime MA filter is configured
+        """
+        if position_side is None:
+            return False
+        if not bool(strategy.params.exit_on_regime_flip):
+            return False
+        if not self._has_regime_filters(strategy):
+            return False
+
+        return not self._regime_allows_side(
+            side=position_side,
+            price=price,
+            trend_ma_value=trend_ma_value,
+            structure_ma_value=structure_ma_value,
+            strategy=strategy,
+        )
+
+    def _close_signal_type_from_side(
+        self,
+        side: Optional[TradePositionSide],
+    ) -> TradeSignalType:
+        """
+        Resolve the close signal type from the currently open side.
+        """
+        if side == TradePositionSide.LONG:
+            return TradeSignalType.CLOSE_LONG
+        if side == TradePositionSide.SHORT:
+            return TradeSignalType.CLOSE_SHORT
+        return TradeSignalType.CLOSE_POSITION
 
     def _normalize_allowed_weekdays(self, value: Optional[List[int | str]]) -> Optional[set[int]]:
         """

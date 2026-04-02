@@ -45,6 +45,8 @@ class TradeStrategyParamsDTO(BaseModel):
     - legacy fixed ATR thresholds
     - dynamic ATR thresholds
     - regime filters based on moving averages
+    - optional entry filters
+    - optional richer exits
     """
 
     atr_window: int = Field(..., ge=1)
@@ -66,11 +68,25 @@ class TradeStrategyParamsDTO(BaseModel):
 
     regime_reverse: bool = Field(default=False)
 
+    min_ref_move_atr_mult: Optional[float] = Field(default=None, gt=0)
+    max_setup_bars: Optional[int] = Field(default=None, gt=0)
+    entry_confirm_bars: Optional[int] = Field(default=None, ge=1)
+    entry_break_recent_high_window: Optional[int] = Field(default=None, gt=0)
+    entry_break_recent_low_window: Optional[int] = Field(default=None, gt=0)
+    min_atr_expansion_ratio: Optional[float] = Field(default=None, gt=0)
+
     cooloff_bars: int = Field(default=1, ge=0)
     trade_mode: TradeMode = Field(default=TradeMode.FLIP)
     reverse_signal: bool = Field(default=False)
     allowed_weekdays: Optional[List[int | str]] = Field(default=None)
     max_loss_pct: Optional[float] = Field(default=None, gt=0, le=1)
+
+    stop_loss_atr_mult: Optional[float] = Field(default=None, gt=0)
+    take_profit_atr_mult: Optional[float] = Field(default=None, gt=0)
+    trailing_stop_atr_mult: Optional[float] = Field(default=None, gt=0)
+    trailing_activation_atr_mult: Optional[float] = Field(default=None, gt=0)
+    max_bars_in_trade: Optional[int] = Field(default=None, ge=1)
+    exit_on_regime_flip: bool = Field(default=False)
 
     model_config = ConfigDict(use_enum_values=True)
 
@@ -86,6 +102,7 @@ class TradeStrategyParamsDTO(BaseModel):
     @field_validator(
         "regime_reverse",
         "reverse_signal",
+        "exit_on_regime_flip",
         mode="before",
     )
     @classmethod
@@ -164,11 +181,25 @@ class TradeStrategyParamsUpdateDTO(BaseModel):
 
     regime_reverse: Optional[bool] = Field(default=None)
 
+    min_ref_move_atr_mult: Optional[float] = Field(default=None, gt=0)
+    max_setup_bars: Optional[int] = Field(default=None, gt=0)
+    entry_confirm_bars: Optional[int] = Field(default=None, ge=1)
+    entry_break_recent_high_window: Optional[int] = Field(default=None, gt=0)
+    entry_break_recent_low_window: Optional[int] = Field(default=None, gt=0)
+    min_atr_expansion_ratio: Optional[float] = Field(default=None, gt=0)
+
     cooloff_bars: Optional[int] = Field(default=None, ge=0)
     trade_mode: Optional[TradeMode] = Field(default=None)
     reverse_signal: Optional[bool] = Field(default=None)
     allowed_weekdays: Optional[List[int | str]] = Field(default=None)
     max_loss_pct: Optional[float] = Field(default=None, gt=0, le=1)
+
+    stop_loss_atr_mult: Optional[float] = Field(default=None, gt=0)
+    take_profit_atr_mult: Optional[float] = Field(default=None, gt=0)
+    trailing_stop_atr_mult: Optional[float] = Field(default=None, gt=0)
+    trailing_activation_atr_mult: Optional[float] = Field(default=None, gt=0)
+    max_bars_in_trade: Optional[int] = Field(default=None, ge=1)
+    exit_on_regime_flip: Optional[bool] = Field(default=None)
 
     model_config = ConfigDict(use_enum_values=True)
 
