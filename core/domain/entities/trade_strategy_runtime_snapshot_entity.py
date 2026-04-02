@@ -61,6 +61,10 @@ class TradeStrategyRuntimeSnapshotEntity(MongoEntity):
 
     setup_armed: int = 0
     setup_reference_price: Optional[float] = None
+    setup_reference_atr: Optional[float] = None
+    setup_reference_atr_value_for_threshold: Optional[float] = None
+    setup_age_bars: int = 0
+
     desired_side: Optional[TradePositionSide] = None
     position_side: Optional[TradePositionSide] = None
 
@@ -70,8 +74,28 @@ class TradeStrategyRuntimeSnapshotEntity(MongoEntity):
     regime_allows_short: int = 1
     regime_allows_desired: Optional[int] = None
 
+    ref_move_ok: Optional[int] = None
+    entry_confirm_ok: Optional[int] = None
+    entry_breakout_ok: Optional[int] = None
+    atr_expansion_ok: Optional[int] = None
+
     entry_reference_price: Optional[float] = None
+    entry_atr: Optional[float] = None
+    entry_atr_value_for_threshold: Optional[float] = None
+    bars_in_trade: int = 0
+
+    best_favorable_price: Optional[float] = None
+    worst_adverse_price: Optional[float] = None
+    trailing_active: int = 0
+
     open_trade_loss_pct: float = 0.0
+
+    setup_expired_now: int = 0
+    stop_loss_atr_hit: int = 0
+    take_profit_atr_hit: int = 0
+    trailing_stop_atr_hit: int = 0
+    timeout_exit_hit: int = 0
+    regime_flip_exit_hit: int = 0
 
     event: Optional[TradeEvent] = None
 

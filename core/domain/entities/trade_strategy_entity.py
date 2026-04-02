@@ -41,30 +41,44 @@ class TradeStrategyParamsEntity(BaseModel):
     Strongly typed parameter object for trade strategies.
     """
 
-    atr_window: int
+    atr_window: int = Field(..., ge=1)
 
-    atr_low_threshold: Optional[float] = None
-    atr_high_threshold: Optional[float] = None
+    atr_low_threshold: Optional[float] = Field(default=None, gt=0)
+    atr_high_threshold: Optional[float] = Field(default=None, gt=0)
     atr_threshold_mode: TradeAtrThresholdMode = TradeAtrThresholdMode.ATR_PCT
 
-    atr_dynamic_window: Optional[int] = None
-    atr_dynamic_low_percentile: Optional[float] = None
-    atr_dynamic_high_percentile: Optional[float] = None
-    atr_dynamic_min_periods: Optional[int] = None
+    atr_dynamic_window: Optional[int] = Field(default=None, gt=1)
+    atr_dynamic_low_percentile: Optional[float] = Field(default=None)
+    atr_dynamic_high_percentile: Optional[float] = Field(default=None)
+    atr_dynamic_min_periods: Optional[int] = Field(default=None, ge=1)
 
-    regime_trend_ma_window: Optional[int] = None
+    regime_trend_ma_window: Optional[int] = Field(default=None, gt=0)
     regime_trend_ma_type: TradeMovingAverageType = TradeMovingAverageType.EMA
 
-    regime_structure_ma_window: Optional[int] = None
+    regime_structure_ma_window: Optional[int] = Field(default=None, gt=0)
     regime_structure_ma_type: TradeMovingAverageType = TradeMovingAverageType.EMA
 
     regime_reverse: bool = False
 
-    cooloff_bars: int = 1
+    min_ref_move_atr_mult: Optional[float] = Field(default=None, gt=0)
+    max_setup_bars: Optional[int] = Field(default=None, gt=0)
+    entry_confirm_bars: Optional[int] = Field(default=None, ge=1)
+    entry_break_recent_high_window: Optional[int] = Field(default=None, gt=0)
+    entry_break_recent_low_window: Optional[int] = Field(default=None, gt=0)
+    min_atr_expansion_ratio: Optional[float] = Field(default=None, gt=0)
+
+    cooloff_bars: int = Field(default=1, ge=0)
     trade_mode: TradeMode = TradeMode.FLIP
     reverse_signal: bool = False
     allowed_weekdays: Optional[List[int | str]] = None
-    max_loss_pct: Optional[float] = None
+    max_loss_pct: Optional[float] = Field(default=None, gt=0, le=1)
+
+    stop_loss_atr_mult: Optional[float] = Field(default=None, gt=0)
+    take_profit_atr_mult: Optional[float] = Field(default=None, gt=0)
+    trailing_stop_atr_mult: Optional[float] = Field(default=None, gt=0)
+    trailing_activation_atr_mult: Optional[float] = Field(default=None, gt=0)
+    max_bars_in_trade: Optional[int] = Field(default=None, ge=1)
+    exit_on_regime_flip: bool = False
 
     model_config = ConfigDict(
         extra="ignore"
@@ -82,6 +96,7 @@ class TradeStrategyParamsEntity(BaseModel):
     @field_validator(
         "regime_reverse",
         "reverse_signal",
+        "exit_on_regime_flip",
         mode="before",
     )
     @classmethod
@@ -118,8 +133,8 @@ class TradeStrategyParamsEntity(BaseModel):
             if int(self.atr_dynamic_window or 0) <= 1:
                 raise ValueError("atr_dynamic_window must be greater than 1")
 
-            low_q = float(self.atr_dynamic_low_percentile)  # already normalized
-            high_q = float(self.atr_dynamic_high_percentile)  # already normalized
+            low_q = float(self.atr_dynamic_low_percentile)
+            high_q = float(self.atr_dynamic_high_percentile)
             if high_q <= low_q:
                 raise ValueError(
                     "atr_dynamic_high_percentile must be greater than "
@@ -136,19 +151,6 @@ class TradeStrategyParamsEntity(BaseModel):
                 )
             if float(self.atr_high_threshold) <= float(self.atr_low_threshold):
                 raise ValueError("atr_high_threshold must be greater than atr_low_threshold")
-
-        if self.regime_trend_ma_window is not None and int(self.regime_trend_ma_window) <= 0:
-            raise ValueError("regime_trend_ma_window must be greater than 0")
-
-        if self.regime_structure_ma_window is not None and int(self.regime_structure_ma_window) <= 0:
-            raise ValueError("regime_structure_ma_window must be greater than 0")
-
-        if self.atr_dynamic_min_periods is not None and int(self.atr_dynamic_min_periods) <= 0:
-            raise ValueError("atr_dynamic_min_periods must be greater than 0")
-
-        if self.max_loss_pct is not None:
-            if not (0.0 < float(self.max_loss_pct) <= 1.0):
-                raise ValueError("max_loss_pct must be greater than 0 and less than or equal to 1")
 
         return self
 
