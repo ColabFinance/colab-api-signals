@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import time
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -16,14 +15,12 @@ from core.repositories.trade_strategy_runtime_snapshot_repository import (
 
 class TradeStrategyRuntimeSnapshotRepositoryMongoDB(TradeStrategyRuntimeSnapshotRepository):
     """
-    MongoDB repository for trade strategy runtime snapshots.
+    MongoDB repository for the latest runtime state of each trade strategy.
 
-    Runtime snapshots are stored separately from trade signals because they
-    represent the computed internal state of the strategy at each closed candle,
-    regardless of whether a signal was emitted or not.
+    This collection stores exactly one current-state document per strategy_id.
     """
 
-    COLLECTION = "trade_strategy_runtime_snapshots"
+    COLLECTION = "trade_strategy_runtime_latest"
 
     def __init__(self, db: AsyncIOMotorDatabase):
         """
@@ -33,48 +30,28 @@ class TradeStrategyRuntimeSnapshotRepositoryMongoDB(TradeStrategyRuntimeSnapshot
 
     async def ensure_indexes(self) -> None:
         """
-        Ensure indexes for idempotent storage and efficient latest/history reads.
+        Create indexes required for latest runtime state storage.
         """
-        await self._col.create_index(
-            [("strategy_id", 1), ("ts", 1)],
-            unique=True,
-            name="ux_trade_strategy_runtime_strategy_ts",
-        )
-        await self._col.create_index(
-            [("strategy_id", 1), ("ts", -1)],
-            name="ix_trade_strategy_runtime_strategy_ts_desc",
-        )
-        await self._col.create_index(
-            [("stream_key", 1), ("ts", -1)],
-            name="ix_trade_strategy_runtime_stream_ts_desc",
-        )
-        await self._col.create_index(
-            [("created_at", -1)],
-            name="ix_trade_strategy_runtime_created_at",
-        )
+        await self._col.create_index([("strategy_id", 1)], unique=True, name="ux_trade_runtime_latest_strategy")
+        await self._col.create_index([("stream_key", 1), ("ts", -1)], name="ix_trade_runtime_latest_stream_ts")
+        await self._col.create_index([("runtime_state", 1), ("ts", -1)], name="ix_trade_runtime_latest_state_ts")
 
-    def _now(self) -> tuple[int, str]:
+    async def upsert(self, snapshot: TradeStrategyRuntimeSnapshotEntity) -> None:
         """
-        Return current UTC time as milliseconds and ISO string.
+        Upsert the current runtime state by strategy_id.
         """
-        now_ms = int(time.time() * 1000)
-        now_iso = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-        return now_ms, now_iso
+        now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+        now_iso = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
-    async def upsert(self, snapshot: TradeStrategyRuntimeSnapshotEntity) -> TradeStrategyRuntimeSnapshotEntity:
-        """
-        Upsert a runtime snapshot keyed by strategy_id and ts.
-
-        This guarantees one snapshot per strategy per closed candle.
-        """
-        now_ms, now_iso = self._now()
-
-        payload = snapshot.to_mongo()
+        payload = snapshot.model_dump(
+            mode="python",
+            exclude={"id", "created_at", "created_at_iso", "updated_at", "updated_at_iso"},
+        )
         payload["updated_at"] = now_ms
         payload["updated_at_iso"] = now_iso
 
         await self._col.update_one(
-            {"strategy_id": snapshot.strategy_id, "ts": int(snapshot.ts)},
+            {"strategy_id": str(snapshot.strategy_id)},
             {
                 "$set": payload,
                 "$setOnInsert": {
@@ -85,38 +62,14 @@ class TradeStrategyRuntimeSnapshotRepositoryMongoDB(TradeStrategyRuntimeSnapshot
             upsert=True,
         )
 
-        stored = await self._col.find_one(
-            {"strategy_id": snapshot.strategy_id, "ts": int(snapshot.ts)}
-        )
-        return TradeStrategyRuntimeSnapshotEntity.from_mongo(stored)
-
     async def get_latest_by_strategy_id(
         self,
         strategy_id: str,
     ) -> Optional[TradeStrategyRuntimeSnapshotEntity]:
         """
-        Fetch the latest runtime snapshot for a strategy.
+        Return the latest runtime state for a strategy.
         """
-        doc = await self._col.find_one(
-            {"strategy_id": str(strategy_id)},
-            sort=[("ts", -1), ("created_at", -1)],
-        )
+        doc = await self._col.find_one({"strategy_id": str(strategy_id)})
         if not doc:
             return None
-        return TradeStrategyRuntimeSnapshotEntity.from_mongo(doc)
-
-    async def list_by_strategy_id(
-        self,
-        strategy_id: str,
-        limit: int,
-    ) -> List[TradeStrategyRuntimeSnapshotEntity]:
-        """
-        List runtime snapshots for a strategy in reverse chronological order.
-        """
-        cursor = (
-            self._col.find({"strategy_id": str(strategy_id)})
-            .sort([("ts", -1), ("created_at", -1)])
-            .limit(int(limit))
-        )
-        docs = await cursor.to_list(length=int(limit))
-        return [TradeStrategyRuntimeSnapshotEntity.from_mongo(doc) for doc in docs if doc]
+        return TradeStrategyRuntimeSnapshotEntity(**doc)

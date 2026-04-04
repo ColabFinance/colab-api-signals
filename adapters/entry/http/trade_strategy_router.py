@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from adapters.entry.http.deps import get_db
@@ -14,10 +14,14 @@ from adapters.entry.http.dtos.trade_strategy_dtos import (
     TradeStrategyUpdateDTO,
 )
 from adapters.entry.http.dtos.trade_strategy_runtime_dtos import (
+    TradeStrategyRuntimeEventOutDTO,
     TradeStrategyRuntimeSnapshotOutDTO,
 )
 from adapters.external.database.trade_signal_repository_mongodb import TradeSignalRepositoryMongoDB
 from adapters.external.database.trade_strategy_repository_mongodb import TradeStrategyRepositoryMongoDB
+from adapters.external.database.trade_strategy_runtime_event_repository_mongodb import (
+    TradeStrategyRuntimeEventRepositoryMongoDB,
+)
 from adapters.external.database.trade_strategy_runtime_snapshot_repository_mongodb import (
     TradeStrategyRuntimeSnapshotRepositoryMongoDB,
 )
@@ -27,7 +31,7 @@ from core.usecases.trade_strategy_use_case import TradeStrategyUseCase
 router = APIRouter(prefix="/trade-strategies", tags=["trade-strategies"])
 
 
-def get_use_case(db: AsyncIOMotorDatabase) -> TradeStrategyUseCase:
+def get_use_case(db: AsyncIOMotorDatabase, request: Request) -> TradeStrategyUseCase:
     """
     Build the trade strategy use case.
     """
@@ -35,19 +39,22 @@ def get_use_case(db: AsyncIOMotorDatabase) -> TradeStrategyUseCase:
         strategy_repo=TradeStrategyRepositoryMongoDB(db),
         signal_repo=TradeSignalRepositoryMongoDB(db),
         runtime_snapshot_repo=TradeStrategyRuntimeSnapshotRepositoryMongoDB(db),
+        runtime_event_repo=TradeStrategyRuntimeEventRepositoryMongoDB(db),
+        strategy_cache_repo=getattr(request.app.state, "trade_strategy_cache_repo", None),
     )
 
 
 @router.post("", response_model=dict)
 async def create_trade_strategy(
     body: TradeStrategyCreateDTO,
+    request: Request,
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """
     Create a new trade strategy.
     """
     try:
-        uc = get_use_case(db)
+        uc = get_use_case(db, request)
         await uc.ensure_indexes()
 
         ent = await uc.create_strategy(body)
@@ -63,6 +70,7 @@ async def create_trade_strategy(
 async def update_trade_strategy(
     strategy_id: str,
     body: TradeStrategyUpdateDTO,
+    request: Request,
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """
@@ -73,7 +81,7 @@ async def update_trade_strategy(
     validated again using the canonical strategy entity.
     """
     try:
-        uc = get_use_case(db)
+        uc = get_use_case(db, request)
         await uc.ensure_indexes()
 
         ent = await uc.update_strategy(strategy_id=strategy_id, data=body)
@@ -92,6 +100,7 @@ async def update_trade_strategy(
 
 @router.get("", response_model=dict)
 async def list_trade_strategies(
+    request: Request,
     stream_key: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     limit: int = Query(500, ge=1, le=5000),
@@ -99,12 +108,9 @@ async def list_trade_strategies(
 ):
     """
     List trade strategies with optional filters.
-
-    This legacy route remains unchanged so existing screens such as tradeHome
-    continue working without any frontend changes.
     """
     try:
-        uc = get_use_case(db)
+        uc = get_use_case(db, request)
         await uc.ensure_indexes()
 
         items = await uc.list_strategies(
@@ -122,6 +128,7 @@ async def list_trade_strategies(
 
 @router.get("/public", response_model=dict)
 async def list_public_trade_strategies(
+    request: Request,
     status: Optional[str] = Query(None),
     stream_key: Optional[str] = Query(None),
     symbol: Optional[str] = Query(None),
@@ -139,7 +146,7 @@ async def list_public_trade_strategies(
     When `page` is sent, page-based pagination is applied.
     """
     try:
-        uc = get_use_case(db)
+        uc = get_use_case(db, request)
         await uc.ensure_indexes()
 
         result = await uc.list_public_strategies(
@@ -172,13 +179,14 @@ async def list_public_trade_strategies(
 @router.post("/status/set", response_model=dict)
 async def set_trade_strategy_status(
     body: TradeStrategyStatusSetDTO,
+    request: Request,
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """
     Update the status of an existing trade strategy.
     """
     try:
-        uc = get_use_case(db)
+        uc = get_use_case(db, request)
         await uc.ensure_indexes()
 
         ent = await uc.set_status(strategy_id=body.strategy_id, status=body.status)
@@ -197,6 +205,7 @@ async def set_trade_strategy_status(
 
 @router.get("/signals", response_model=dict)
 async def list_trade_signals(
+    request: Request,
     strategy_id: Optional[str] = Query(None),
     limit: int = Query(10, ge=1, le=5000),
     page: Optional[int] = Query(None, ge=1),
@@ -206,10 +215,11 @@ async def list_trade_signals(
     """
     List generated trade signals with pagination support.
 
-    This route keeps the existing path while adding `page` and `offset`.
+    This route is useful for module-wide observability and can also be filtered
+    by strategy_id.
     """
     try:
-        uc = get_use_case(db)
+        uc = get_use_case(db, request)
         await uc.ensure_indexes()
 
         result = await uc.list_signals_paginated(
@@ -230,19 +240,66 @@ async def list_trade_signals(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list trade signals: {exc}") from exc
-    
 
-@router.get("/runtime/latest", response_model=dict)
-async def get_latest_trade_strategy_runtime_snapshot(
-    strategy_id: str = Query(...),
+
+@router.get("/{strategy_id}/signals", response_model=dict)
+async def list_trade_signals_by_strategy_id(
+    strategy_id: str,
+    request: Request,
+    limit: int = Query(10, ge=1, le=5000),
+    page: Optional[int] = Query(None, ge=1),
+    offset: Optional[int] = Query(None, ge=0),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """
-    Fetch the latest runtime snapshot for a trade strategy.
+    List generated trade signals for one strategy.
     """
     try:
-        uc = get_use_case(db)
+        uc = get_use_case(db, request)
         await uc.ensure_indexes()
+
+        strategy = await uc.get_strategy_by_id(strategy_id=strategy_id)
+        if strategy is None:
+            raise HTTPException(status_code=404, detail="Trade strategy not found.")
+
+        result = await uc.list_signals_paginated(
+            strategy_id=strategy_id,
+            limit=int(limit),
+            page=page,
+            offset=offset,
+        )
+        data = [TradeSignalOutDTO.model_validate(item.model_dump()) for item in result["items"]]
+
+        return {
+            "ok": True,
+            "message": "ok",
+            "data": data,
+            "pagination": result["pagination"],
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to list trade strategy signals: {exc}") from exc
+
+
+@router.get("/{strategy_id}/runtime/latest", response_model=dict)
+async def get_trade_strategy_runtime_latest_by_strategy_id(
+    strategy_id: str,
+    request: Request,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Fetch the latest runtime state for a trade strategy.
+    """
+    try:
+        uc = get_use_case(db, request)
+        await uc.ensure_indexes()
+
+        strategy = await uc.get_strategy_by_id(strategy_id=strategy_id)
+        if strategy is None:
+            raise HTTPException(status_code=404, detail="Trade strategy not found.")
 
         ent = await uc.get_latest_runtime_snapshot(strategy_id=strategy_id)
         data = (
@@ -251,47 +308,57 @@ async def get_latest_trade_strategy_runtime_snapshot(
             else None
         )
         return {"ok": True, "message": "ok", "data": data}
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch latest runtime snapshot: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"Failed to fetch latest runtime state: {exc}") from exc
 
 
-@router.get("/runtime/history", response_model=dict)
-async def list_trade_strategy_runtime_history(
-    strategy_id: str = Query(...),
+@router.get("/{strategy_id}/runtime/events", response_model=dict)
+async def list_trade_strategy_runtime_events_by_strategy_id(
+    strategy_id: str,
+    request: Request,
     limit: int = Query(200, ge=1, le=5000),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """
-    List runtime snapshot history for a trade strategy.
+    List runtime events for a trade strategy.
     """
     try:
-        uc = get_use_case(db)
+        uc = get_use_case(db, request)
         await uc.ensure_indexes()
 
-        items = await uc.list_runtime_snapshots(
+        strategy = await uc.get_strategy_by_id(strategy_id=strategy_id)
+        if strategy is None:
+            raise HTTPException(status_code=404, detail="Trade strategy not found.")
+
+        items = await uc.list_runtime_events(
             strategy_id=strategy_id,
             limit=int(limit),
         )
-        data = [TradeStrategyRuntimeSnapshotOutDTO.model_validate(item.model_dump()) for item in items]
+        data = [TradeStrategyRuntimeEventOutDTO.model_validate(item.model_dump()) for item in items]
         return {"ok": True, "message": "ok", "data": data}
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to list runtime snapshots: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"Failed to list runtime events: {exc}") from exc
 
 
 @router.get("/{strategy_id}", response_model=dict)
 async def get_trade_strategy_by_id(
     strategy_id: str,
+    request: Request,
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """
     Fetch one trade strategy by identifier.
     """
     try:
-        uc = get_use_case(db)
+        uc = get_use_case(db, request)
         await uc.ensure_indexes()
 
         ent = await uc.get_strategy_by_id(strategy_id=strategy_id)

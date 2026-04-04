@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel
 
 
 class TradeStrategyRuntimeSnapshotOutDTO(BaseModel):
     """
-    DTO returned when reading trade strategy runtime snapshots.
+    DTO returned when reading the latest trade strategy runtime state.
     """
 
     id: Optional[str] = None
@@ -89,6 +89,49 @@ class TradeStrategyRuntimeSnapshotOutDTO(BaseModel):
 
     runtime_state: Optional[str] = None
     bars_since_last_event: int = 0
+
+    created_at: Optional[int] = None
+    created_at_iso: Optional[str] = None
+    updated_at: Optional[int] = None
+    updated_at_iso: Optional[str] = None
+
+
+class TradeStrategyRuntimeEventOutDTO(BaseModel):
+    """
+    DTO returned when reading trade strategy runtime events.
+    """
+
+    id: Optional[str] = None
+
+    idempotency_key: str
+
+    strategy_id: str
+    stream_key: str
+    symbol: str
+    interval: str
+    ts: int
+
+    event: Optional[str] = None
+    signal_type: Optional[str] = None
+
+    runtime_state: str
+    previous_runtime_state: Optional[str] = None
+
+    position_side: Optional[str] = None
+    previous_position_side: Optional[str] = None
+
+    desired_side: Optional[str] = None
+
+    setup_armed: int = 0
+    previous_setup_armed: int = 0
+
+    bars_since_last_event: int = 0
+
+    close: float = 0.0
+    atr: float = 0.0
+    atr_pct: float = 0.0
+
+    payload: Dict[str, Any] = {}
 
     created_at: Optional[int] = None
     created_at_iso: Optional[str] = None
