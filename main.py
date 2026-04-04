@@ -215,7 +215,9 @@ async def lifespan(app: FastAPI):
             bot_token=settings.TELEGRAM_BOT_TOKEN,
             chat_id=settings.TELEGRAM_CHAT_ID,
         )
+        await notifier.start()
 
+    app.state.telegram_notifier = notifier
     trade_execution_client = TradeExecutionHttpClient(base_url=settings.TRADE_EXECUTION_BASE_URL)
     app.state.trade_execution_client = trade_execution_client
 
@@ -296,6 +298,12 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Failed closing Redis client.")
 
+        try:
+            if getattr(app.state, "telegram_notifier", None) is not None:
+                await app.state.telegram_notifier.stop()
+        except Exception:
+            logger.exception("Failed closing TelegramNotifier.")
+            
         mongo_client.close()
         logger.info("MongoDB client closed.")
 

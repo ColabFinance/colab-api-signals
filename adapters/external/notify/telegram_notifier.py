@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+
 from telegram import Bot
 from telegram.constants import ParseMode
 
 
 class TelegramNotifier:
     """
-    Telegram notifier used by api-signals.
+    Telegram notifier used by the services.
 
-    This notifier supports both text messages and photo uploads and applies
-    Markdown parsing so execution reports keep the intended formatting.
+    This notifier keeps a single reusable Bot client alive during the
+    application lifecycle and supports both text messages and photo uploads.
     """
 
     def __init__(self, *, bot_token: str, chat_id: str) -> None:
@@ -22,6 +24,30 @@ class TelegramNotifier:
         """
         self._bot = Bot(token=str(bot_token))
         self._chat_id = str(chat_id)
+        self._started = False
+        self._start_stop_lock = asyncio.Lock()
+
+    async def start(self) -> None:
+        """
+        Initialize the underlying Telegram bot client once.
+        """
+        async with self._start_stop_lock:
+            if self._started:
+                return
+
+            await self._bot.initialize()
+            self._started = True
+
+    async def stop(self) -> None:
+        """
+        Shutdown the underlying Telegram bot client once.
+        """
+        async with self._start_stop_lock:
+            if not self._started:
+                return
+
+            await self._bot.shutdown()
+            self._started = False
 
     async def send_message(self, text: str) -> None:
         """
@@ -31,20 +57,21 @@ class TelegramNotifier:
         because of parsing issues, it retries using plain text so the alert
         is still delivered.
         """
-        async with self._bot:
-            try:
-                await self._bot.send_message(
-                    chat_id=self._chat_id,
-                    text=text,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_web_page_preview=True,
-                )
-            except Exception:
-                await self._bot.send_message(
-                    chat_id=self._chat_id,
-                    text=text,
-                    disable_web_page_preview=True,
-                )
+        await self._ensure_started()
+
+        try:
+            await self._bot.send_message(
+                chat_id=self._chat_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            await self._bot.send_message(
+                chat_id=self._chat_id,
+                text=text,
+                disable_web_page_preview=True,
+            )
 
     async def send_photo(self, photo_path: str, caption: str | None = None) -> None:
         """
@@ -57,17 +84,26 @@ class TelegramNotifier:
         If Telegram rejects the caption for any reason, the photo is retried
         without caption so the chart is still delivered.
         """
-        async with self._bot:
-            with open(photo_path, "rb") as photo:
-                try:
-                    await self._bot.send_photo(
-                        chat_id=self._chat_id,
-                        photo=photo,
-                        caption=caption,
-                    )
-                except Exception:
-                    photo.seek(0)
-                    await self._bot.send_photo(
-                        chat_id=self._chat_id,
-                        photo=photo,
-                    )
+        await self._ensure_started()
+
+        with open(photo_path, "rb") as photo:
+            try:
+                await self._bot.send_photo(
+                    chat_id=self._chat_id,
+                    photo=photo,
+                    caption=caption,
+                )
+            except Exception:
+                photo.seek(0)
+                await self._bot.send_photo(
+                    chat_id=self._chat_id,
+                    photo=photo,
+                )
+
+    async def _ensure_started(self) -> None:
+        """
+        Ensure the reusable Telegram client is initialized before use.
+        """
+        if self._started:
+            return
+        await self.start()
