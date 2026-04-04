@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
@@ -28,8 +29,7 @@ class SignalExecutorSupervisor:
         mongo_client: AsyncIOMotorClient,
         db: AsyncIOMotorDatabase,
         lp_base_url: str,
-        telegram_bot_token: str = "",
-        telegram_chat_id: str = "",
+        notifier: Optional[TelegramNotifier] = None,
         poll_interval_s: float = 5.0,
     ) -> None:
         """
@@ -39,8 +39,7 @@ class SignalExecutorSupervisor:
         self._mongo_client = mongo_client
         self._db = db
         self._lp_base_url = str(lp_base_url or "").rstrip("/")
-        self._telegram_bot_token = telegram_bot_token or ""
-        self._telegram_chat_id = telegram_chat_id or ""
+        self._notifier = notifier
         self._poll_interval_s = float(poll_interval_s)
 
         self._task: asyncio.Task | None = None
@@ -69,20 +68,13 @@ class SignalExecutorSupervisor:
         await signal_repo.ensure_indexes()
         await trigger_repo.ensure_indexes()
 
-        notifier = None
-        if self._telegram_bot_token and self._telegram_chat_id:
-            notifier = TelegramNotifier(
-                bot_token=self._telegram_bot_token,
-                chat_id=self._telegram_chat_id,
-            )
-
         self._lp_client = PipelineHttpClient(self._lp_base_url)
 
         self._lp_uc = ExecuteSignalPipelineUseCase(
             signal_repo=signal_repo,
             episode_repo=episode_repo,
             lp_client=self._lp_client,
-            notifier=notifier,
+            notifier=self._notifier,
         )
 
         async def _loop() -> None:

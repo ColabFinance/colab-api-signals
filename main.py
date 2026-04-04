@@ -107,13 +107,22 @@ async def lifespan(app: FastAPI):
 
     poll_interval_s = float(os.getenv("SIGNAL_EXECUTOR_POLL_INTERVAL_S", "2"))
 
+    notifier = None
+    if settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID:
+        notifier = TelegramNotifier(
+            bot_token=settings.TELEGRAM_BOT_TOKEN,
+            chat_id=settings.TELEGRAM_CHAT_ID,
+        )
+        await notifier.start()
+
+    app.state.telegram_notifier = notifier
+    
     # LP executor remains separated from trade execution.
     lp_executor = SignalExecutorSupervisor(
         mongo_client=mongo_client,
         db=db,
         lp_base_url=settings.LP_BASE_URL,
-        telegram_bot_token=settings.TELEGRAM_BOT_TOKEN,
-        telegram_chat_id=settings.TELEGRAM_CHAT_ID,
+        notifier=notifier,
         poll_interval_s=poll_interval_s,
     )
     app.state.signal_executor = lp_executor
@@ -209,15 +218,6 @@ async def lifespan(app: FastAPI):
 
     app.state.trade_candle_eval_workers = eval_workers
 
-    notifier = None
-    if settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID:
-        notifier = TelegramNotifier(
-            bot_token=settings.TELEGRAM_BOT_TOKEN,
-            chat_id=settings.TELEGRAM_CHAT_ID,
-        )
-        await notifier.start()
-
-    app.state.telegram_notifier = notifier
     trade_execution_client = TradeExecutionHttpClient(base_url=settings.TRADE_EXECUTION_BASE_URL)
     app.state.trade_execution_client = trade_execution_client
 
