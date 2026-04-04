@@ -17,3 +17,4 @@ h2==4.3.0
 matplotlib
 mplfinance
 python-telegram-bot
+redis

@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Callable, Dict, Optional, cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field, field_validator
 
-from adapters.external.database.trade_trigger_event_repository_mongodb import TradeTriggerEventRepositoryMongoDB
 from adapters.external.database.trigger_event_repository_mongodb import TriggerEventRepositoryMongoDB
 from core.usecases.candle_closed_trigger_use_case import CandleClosedTriggerUseCase
-from core.usecases.trade_candle_closed_trigger_use_case import TradeCandleClosedTriggerUseCase
 
 from .deps import get_db
 
@@ -125,7 +124,7 @@ async def candle_closed_trigger(
         db=db,
         market_data_base_url=market_data_base_url,
         pipeline_base_url=pipeline_base_url,
-        max_concurrency=int(getattr(request.app.state, "trigger_max_concurrency", 10) or 10),
+        max_concurrency=int(os.getenv("TRIGGER_MAX_CONCURRENCY", "10")),
         logger=logger,
         signal_waker=signal_waker,
     )
@@ -148,43 +147,30 @@ async def candle_closed_trigger(
 async def trade_candle_closed_trigger(
     dto: TradeCandleClosedTriggerDTO,
     request: Request,
-    db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> Dict[str, Any]:
     """
-    Receive and enqueue the trade stream-based candle closed trigger.
+    Receive and enqueue the legacy trade stream-based candle closed trigger.
+
+    This route remains available as a manual fallback, but the normal hot path
+    now comes from Redis Streams.
     """
     logger = logging.getLogger("TradeCandleClosedTrigger")
 
-    trig_repo = TradeTriggerEventRepositoryMongoDB(db)
-    is_new = await trig_repo.mark_if_new(dto.stream_key, dto.ts)
-    if not is_new:
-        return {"ok": True, "queued": False, "processed": False, "reason": "duplicate_event"}
-
-    market_data_base_url = _get_state_str(request.app, "market_data_base_url", "")
-
-    executor = getattr(request.app.state, "signal_executor", None)
-    signal_waker: Optional[Callable[[], None]] = None
-    if executor is not None:
-        signal_waker = cast(Callable[[], None], executor.wake)
-
-    uc = TradeCandleClosedTriggerUseCase(
-        db=db,
-        market_data_base_url=market_data_base_url,
-        max_concurrency=int(getattr(request.app.state, "trigger_max_concurrency", 10) or 10),
-        logger=logger,
-        signal_waker=signal_waker,
-    )
+    processor = getattr(request.app.state, "trade_candle_processor", None)
+    if processor is None:
+        raise HTTPException(status_code=503, detail="Trade candle processor is not available.")
 
     asyncio.create_task(
-        uc.execute(
+        processor.execute(
             stream_key=dto.stream_key,
             ts=dto.ts,
             source=dto.source,
             symbol=dto.symbol,
             interval=dto.interval,
+            candle=dto.candle,
         )
     )
 
-    logger.info("Queued trade_candle_closed. stream_key=%s ts=%s", dto.stream_key, dto.ts)
+    logger.info("Queued legacy trade_candle_closed. stream_key=%s ts=%s", dto.stream_key, dto.ts)
 
     return {"ok": True, "queued": True, "stream_key": dto.stream_key, "ts": dto.ts}

@@ -9,11 +9,30 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from adapters.entry.http.strategy_episode_router import router as episodes_router
 from adapters.entry.http.strategy_router import router as strategy_params_router
+from adapters.entry.http.trade_runtime_router import router as trade_runtime_router
 from adapters.entry.http.trade_strategy_router import router as trade_strategy_router
 from adapters.entry.http.trigger_router import router as triggers_router
 from adapters.external.database.mongodb_client import get_mongo_client
+from adapters.external.database.trade_signal_repository_mongodb import TradeSignalRepositoryMongoDB
+from adapters.external.database.trade_strategy_repository_mongodb import TradeStrategyRepositoryMongoDB
+from adapters.external.database.trade_strategy_runtime_snapshot_repository_mongodb import (
+    TradeStrategyRuntimeSnapshotRepositoryMongoDB,
+)
+from adapters.external.database.trade_trigger_event_repository_mongodb import (
+    TradeTriggerEventRepositoryMongoDB,
+)
+from adapters.external.market_data.market_data_http_client import MarketDataHttpClient
+from adapters.external.redis.redis_client import get_redis_client
+from adapters.external.redis.trade_candle_buffer_repository_redis import (
+    TradeCandleBufferRepositoryRedis,
+)
 from config.settings import settings
+from core.usecases.process_trade_candle_closed_event_use_case import (
+    ProcessTradeCandleClosedEventUseCase,
+)
+from core.usecases.trade_candle_buffer_use_case import TradeCandleBufferUseCase
 from workers.signal_executor_supervisor import SignalExecutorSupervisor
+from workers.trade_candle_stream_consumer import TradeCandleStreamConsumerWorker
 
 
 def _setup_logging() -> None:
@@ -52,8 +71,22 @@ async def lifespan(app: FastAPI):
         logger.exception("MongoDB ping failed (startup).")
         raise
 
+    redis_socket_timeout_s = max(
+        30.0,
+        float(settings.TRADE_CANDLE_STREAM_BLOCK_MS) / 1000.0 + 10.0,
+    )
+
+    redis_client = get_redis_client(socket_timeout_s=redis_socket_timeout_s)
+    try:
+        await redis_client.ping()
+        logger.info("Redis ping ok.")
+    except Exception:
+        logger.exception("Redis ping failed (startup).")
+        raise
+
+    app.state.redis_client = redis_client
+
     poll_interval_s = float(os.getenv("SIGNAL_EXECUTOR_POLL_INTERVAL_S", "2"))
-    app.state.trigger_max_concurrency = int(os.getenv("TRIGGER_MAX_CONCURRENCY", "10"))
 
     executor = SignalExecutorSupervisor(
         mongo_client=mongo_client,
@@ -66,7 +99,50 @@ async def lifespan(app: FastAPI):
     )
     app.state.signal_executor = executor
 
+    await TradeTriggerEventRepositoryMongoDB(db).ensure_indexes()
+
+    market_data_client = MarketDataHttpClient(base_url=settings.MARKET_DATA_BASE_URL)
+
+    trade_candle_buffer_repo = TradeCandleBufferRepositoryRedis(
+        redis_client=redis_client,
+        key_prefix=settings.TRADE_CANDLE_BUFFER_KEY_PREFIX,
+        maxlen=settings.TRADE_CANDLE_BUFFER_MAXLEN,
+    )
+    app.state.trade_candle_buffer_repo = trade_candle_buffer_repo
+
+    trade_candle_buffer_uc = TradeCandleBufferUseCase(
+        candle_buffer_repo=trade_candle_buffer_repo,
+        market_data_client=market_data_client,
+    )
+    app.state.trade_candle_buffer_uc = trade_candle_buffer_uc
+
+    trade_candle_processor = ProcessTradeCandleClosedEventUseCase(
+        trigger_event_repo=TradeTriggerEventRepositoryMongoDB(db),
+        strategy_repo=TradeStrategyRepositoryMongoDB(db),
+        signal_repo=TradeSignalRepositoryMongoDB(db),
+        runtime_snapshot_repo=TradeStrategyRuntimeSnapshotRepositoryMongoDB(db),
+        candle_buffer_repo=trade_candle_buffer_repo,
+        market_data_client=market_data_client,
+        logger=logger,
+        signal_waker=executor.wake,
+        buffer_maxlen=settings.TRADE_CANDLE_BUFFER_MAXLEN,
+    )
+    app.state.trade_candle_processor = trade_candle_processor
+
+    trade_candle_consumer = TradeCandleStreamConsumerWorker(
+        redis_client=redis_client,
+        processor=trade_candle_processor,
+        stream_name=settings.REDIS_TRADE_CANDLE_STREAM,
+        group_name=settings.REDIS_TRADE_CANDLE_GROUP,
+        consumer_name=settings.REDIS_TRADE_CANDLE_CONSUMER_NAME,
+        block_ms=settings.TRADE_CANDLE_STREAM_BLOCK_MS,
+        read_count=settings.TRADE_CANDLE_STREAM_READ_COUNT,
+        logger=logging.getLogger("TradeCandleStreamConsumer"),
+    )
+    app.state.trade_candle_consumer = trade_candle_consumer
+
     await executor.start()
+    await trade_candle_consumer.start()
 
     try:
         yield
@@ -74,10 +150,23 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down api-signals (lifespan shutdown)...")
 
         try:
+            if getattr(app.state, "trade_candle_consumer", None) is not None:
+                await app.state.trade_candle_consumer.stop()
+        except Exception:
+            logger.exception("Failed stopping TradeCandleStreamConsumerWorker.")
+
+        try:
             if getattr(app.state, "signal_executor", None) is not None:
                 await app.state.signal_executor.stop()
         except Exception:
             logger.exception("Failed stopping SignalExecutorSupervisor.")
+
+        try:
+            if getattr(app.state, "redis_client", None) is not None:
+                await app.state.redis_client.aclose()
+                logger.info("Redis client closed.")
+        except Exception:
+            logger.exception("Failed closing Redis client.")
 
         mongo_client.close()
         logger.info("MongoDB client closed.")
@@ -100,6 +189,7 @@ app.include_router(strategy_params_router, prefix="/api")
 app.include_router(triggers_router, prefix="/api")
 app.include_router(episodes_router, prefix="/api")
 app.include_router(trade_strategy_router, prefix="/api")
+app.include_router(trade_runtime_router, prefix="/api")
 
 
 @app.get("/healthz")

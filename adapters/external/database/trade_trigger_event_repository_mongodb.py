@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timezone
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import DuplicateKeyError
 
 from core.repositories.trade_trigger_event_repository import TradeTriggerEventRepository
 
@@ -49,5 +50,5 @@ class TradeTriggerEventRepositoryMongoDB(TradeTriggerEventRepository):
         try:
             await self._col.insert_one(doc)
             return True
-        except Exception:
+        except DuplicateKeyError:
             return False

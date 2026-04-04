@@ -28,6 +28,18 @@ class Settings:
     LP_BASE_URL: str = os.getenv("LP_BASE_URL", "http://172.17.0.1:8000")
     TRADE_EXECUTION_BASE_URL: str = os.getenv("TRADE_EXECUTION_BASE_URL", "http://172.17.0.1:8002")
 
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://host.docker.internal:6379/0")
+    REDIS_TRADE_CANDLE_STREAM: str = os.getenv("REDIS_TRADE_CANDLE_STREAM", "trade.candle.closed.v1")
+    REDIS_TRADE_CANDLE_GROUP: str = os.getenv("REDIS_TRADE_CANDLE_GROUP", "api-signals-trade")
+    REDIS_TRADE_CANDLE_CONSUMER_NAME: str = os.getenv(
+        "REDIS_TRADE_CANDLE_CONSUMER_NAME",
+        f"{os.getenv('APP_NAME', 'api-signals')}-trade",
+    )
+    TRADE_CANDLE_STREAM_BLOCK_MS: int = int(os.getenv("TRADE_CANDLE_STREAM_BLOCK_MS", "5000"))
+    TRADE_CANDLE_STREAM_READ_COUNT: int = int(os.getenv("TRADE_CANDLE_STREAM_READ_COUNT", "1"))
+    TRADE_CANDLE_BUFFER_KEY_PREFIX: str = os.getenv("TRADE_CANDLE_BUFFER_KEY_PREFIX", "trade:candles")
+    TRADE_CANDLE_BUFFER_MAXLEN: int = int(os.getenv("TRADE_CANDLE_BUFFER_MAXLEN", "2000"))
+
     ENABLE_BACKFILL_ON_START: bool = os.getenv("ENABLE_BACKFILL_ON_START", "true").lower() == "true"
 
     APP_NAME: str = os.getenv("APP_NAME", "api-signals")

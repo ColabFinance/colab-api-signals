@@ -23,8 +23,9 @@ class EvaluateActiveTradeStrategiesUseCase:
     """
     Evaluate all active trade strategies for a closed 1m candle.
 
-    This use case fetches candles only once for the stream using the largest
-    required candle window among active strategies.
+    This use case can work with either:
+    - a preloaded candle window passed by the caller
+    - a fallback fetch from api-market-data
 
     For each evaluated strategy, it persists:
     - the current runtime snapshot
@@ -64,6 +65,8 @@ class EvaluateActiveTradeStrategiesUseCase:
         source: str,
         symbol: str,
         interval: str,
+        candles: Optional[List[dict]] = None,
+        strategies: Optional[List[TradeStrategyEntity]] = None,
     ) -> List[TradeSignalEntity]:
         """
         Evaluate all active trade strategies for a stream_key and candle close timestamp.
@@ -73,29 +76,31 @@ class EvaluateActiveTradeStrategiesUseCase:
         """
         normalized_stream_key = str(stream_key).strip().lower()
 
-        strategies = await self._strategy_repo.get_active_by_stream_key(normalized_stream_key)
-        if not strategies:
+        resolved_strategies = strategies or await self._strategy_repo.get_active_by_stream_key(normalized_stream_key)
+        if not resolved_strategies:
             return []
 
-        required_limit = self._resolve_required_limit(strategies)
-        candles = await self._market_data.list_candles(
-            stream_key=normalized_stream_key,
-            limit=int(required_limit),
-        )
+        resolved_candles = candles
+        if resolved_candles is None:
+            required_limit = self._resolve_required_limit(resolved_strategies)
+            resolved_candles = await self._market_data.list_candles(
+                stream_key=normalized_stream_key,
+                limit=int(required_limit),
+            )
 
-        if not candles:
+        if not resolved_candles:
             self._logger.warning("No candles returned for stream_key=%s ts=%s", normalized_stream_key, ts)
             return []
 
         out: List[TradeSignalEntity] = []
 
-        for strategy in strategies:
+        for strategy in resolved_strategies:
             try:
                 previous_snapshot = await self._runtime_snapshot_repo.get_latest_by_strategy_id(str(strategy.id))
 
                 result = self._strategy_service.evaluate_latest(
                     strategy=strategy,
-                    candles=candles,
+                    candles=resolved_candles,
                     previous_snapshot=previous_snapshot,
                 )
                 if result is None:
@@ -188,9 +193,15 @@ class EvaluateActiveTradeStrategiesUseCase:
         return max(50, int(max_need))
 
     def _normalize_signal_type(self, value: Any) -> TradeSignalType:
+        """
+        Normalize an arbitrary value to a TradeSignalType.
+        """
         if isinstance(value, TradeSignalType):
             return value
         return TradeSignalType(str(value).strip().upper())
 
     def _enum_value(self, value: Any) -> Any:
+        """
+        Return the raw enum value when the object is an enum-like instance.
+        """
         return value.value if hasattr(value, "value") else value
