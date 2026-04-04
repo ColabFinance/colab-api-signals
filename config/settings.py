@@ -67,7 +67,9 @@ class Settings:
     TRADE_CANDLE_BUFFER_MAXLEN: int = int(os.getenv("TRADE_CANDLE_BUFFER_MAXLEN", "2000"))
 
     TRADE_STRATEGY_CACHE_KEY_PREFIX: str = os.getenv("TRADE_STRATEGY_CACHE_KEY_PREFIX", "trade:strategies")
-    TRADE_STRATEGY_CACHE_TTL_S: int = int(os.getenv("TRADE_STRATEGY_CACHE_TTL_S", "30"))
+    # A long TTL is used as a safety net. The cache is actively refreshed on writes.
+    # Set 0 to keep the strategy cache without expiration.
+    TRADE_STRATEGY_CACHE_TTL_S: int = int(os.getenv("TRADE_STRATEGY_CACHE_TTL_S", "43200"))
 
     ENABLE_BACKFILL_ON_START: bool = os.getenv("ENABLE_BACKFILL_ON_START", "true").lower() == "true"
 

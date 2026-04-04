@@ -190,7 +190,7 @@ class ProcessTradeCandleClosedEventUseCase:
         """
         Bootstrap the rolling buffer from api-market-data only when the hot buffer is insufficient.
         """
-        bootstrap_limit = max(50, int(required_limit))
+        bootstrap_limit = max(50, int(buffer_target_len))
         historical = await self._market_data.list_candles(
             stream_key=stream_key,
             limit=bootstrap_limit,

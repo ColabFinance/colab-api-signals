@@ -7,6 +7,9 @@ from adapters.entry.http.dtos.trade_strategy_dtos import (
     TradeStrategyCreateDTO,
     TradeStrategyUpdateDTO,
 )
+from adapters.external.redis.trade_strategy_cache_repository_redis import (
+    TradeStrategyCacheRepositoryRedis,
+)
 from core.domain.entities.trade_strategy_entity import (
     TradeStrategyEntity,
     TradeStrategyParamsEntity,
@@ -32,6 +35,7 @@ class TradeStrategyUseCase:
     signal_repo: TradeSignalRepository
     runtime_snapshot_repo: TradeStrategyRuntimeSnapshotRepository
     runtime_event_repo: TradeStrategyRuntimeEventRepository
+    strategy_cache_repo: Optional[TradeStrategyCacheRepositoryRedis] = None
 
     async def ensure_indexes(self) -> None:
         """
@@ -58,7 +62,9 @@ class TradeStrategyUseCase:
             execution_account_id=(str(data.execution_account_id).strip() if data.execution_account_id else None),
             params=TradeStrategyParamsEntity(**data.params.model_dump(mode="python")),
         )
-        return await self.strategy_repo.create(ent)
+        stored = await self.strategy_repo.create(ent)
+        await self._refresh_cache_for_stream(stored.stream_key)
+        return stored
 
     async def update_strategy(
         self,
@@ -152,7 +158,15 @@ class TradeStrategyUseCase:
             "params": validated_entity.params.model_dump(mode="python"),
         }
 
-        return await self.strategy_repo.update(str(strategy_id), update_payload)
+        stored = await self.strategy_repo.update(str(strategy_id), update_payload)
+        if stored is None:
+            return None
+
+        await self._refresh_cache_for_stream(current.stream_key)
+        if str(current.stream_key).strip().lower() != str(stored.stream_key).strip().lower():
+            await self._refresh_cache_for_stream(stored.stream_key)
+
+        return stored
 
     async def get_strategy_by_id(self, *, strategy_id: str) -> Optional[TradeStrategyEntity]:
         """
@@ -248,8 +262,17 @@ class TradeStrategyUseCase:
         """
         Update the status of one stored trade strategy.
         """
+        current = await self.strategy_repo.get_by_id(str(strategy_id))
+        if current is None:
+            return None
+
         normalized_status = TradeStrategyStatus(str(status).strip().upper())
-        return await self.strategy_repo.set_status(str(strategy_id), normalized_status.value)
+        stored = await self.strategy_repo.set_status(str(strategy_id), normalized_status.value)
+        if stored is None:
+            return None
+
+        await self._refresh_cache_for_stream(stored.stream_key)
+        return stored
 
     async def list_signals(
         self,
@@ -319,4 +342,20 @@ class TradeStrategyUseCase:
         return await self.runtime_event_repo.list_last_by_strategy_id(
             strategy_id=str(strategy_id),
             limit=int(limit),
+        )
+
+    async def _refresh_cache_for_stream(self, stream_key: str) -> None:
+        """
+        Refresh the Redis cache for one stream_key from MongoDB.
+
+        The cache is refreshed on write paths so runtime reads stay hot and consistent.
+        """
+        if self.strategy_cache_repo is None:
+            return
+
+        normalized_stream_key = str(stream_key).strip().lower()
+        active_strategies = await self.strategy_repo.get_active_by_stream_key(normalized_stream_key)
+        await self.strategy_cache_repo.set_active_by_stream_key(
+            stream_key=normalized_stream_key,
+            strategies=active_strategies,
         )

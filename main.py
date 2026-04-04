@@ -118,13 +118,19 @@ async def lifespan(app: FastAPI):
     )
     app.state.signal_executor = lp_executor
 
-    # Ensure trade indexes used by evaluation/execution.
-    await TradeStrategyRepositoryMongoDB(db).ensure_indexes()
-    await TradeSignalRepositoryMongoDB(db).ensure_indexes()
-    await TradeStrategyRuntimeSnapshotRepositoryMongoDB(db).ensure_indexes()
-    await TradeStrategyRuntimeEventRepositoryMongoDB(db).ensure_indexes()
-
     market_data_client = MarketDataHttpClient(base_url=settings.MARKET_DATA_BASE_URL)
+    app.state.market_data_client = market_data_client
+
+    trade_strategy_repo = TradeStrategyRepositoryMongoDB(db)
+    trade_signal_repo = TradeSignalRepositoryMongoDB(db)
+    trade_runtime_snapshot_repo = TradeStrategyRuntimeSnapshotRepositoryMongoDB(db)
+    trade_runtime_event_repo = TradeStrategyRuntimeEventRepositoryMongoDB(db)
+
+    # Ensure trade indexes used by evaluation/execution.
+    await trade_strategy_repo.ensure_indexes()
+    await trade_signal_repo.ensure_indexes()
+    await trade_runtime_snapshot_repo.ensure_indexes()
+    await trade_runtime_event_repo.ensure_indexes()
 
     trade_candle_buffer_repo = TradeCandleBufferRepositoryRedis(
         redis_client=redis_client,
@@ -156,12 +162,9 @@ async def lifespan(app: FastAPI):
     )
     app.state.trade_pipeline_publisher = trade_pipeline_publisher
 
-    trade_runtime_snapshot_repo = TradeStrategyRuntimeSnapshotRepositoryMongoDB(db)
-    trade_runtime_event_repo = TradeStrategyRuntimeEventRepositoryMongoDB(db)
-
     trade_candle_processor = ProcessTradeCandleClosedEventUseCase(
-        strategy_repo=TradeStrategyRepositoryMongoDB(db),
-        signal_repo=TradeSignalRepositoryMongoDB(db),
+        strategy_repo=trade_strategy_repo,
+        signal_repo=trade_signal_repo,
         runtime_snapshot_repo=trade_runtime_snapshot_repo,
         runtime_event_repo=trade_runtime_event_repo,
         candle_buffer_repo=trade_candle_buffer_repo,
@@ -217,7 +220,7 @@ async def lifespan(app: FastAPI):
     app.state.trade_execution_client = trade_execution_client
 
     trade_signal_execution_uc = ExecuteTradeSignalPipelineUseCase(
-        trade_signal_repo=TradeSignalRepositoryMongoDB(db),
+        trade_signal_repo=trade_signal_repo,
         runtime_snapshot_repo=trade_runtime_snapshot_repo,
         trade_execution_client=trade_execution_client,
         market_data_client=market_data_client,
@@ -279,6 +282,12 @@ async def lifespan(app: FastAPI):
                 await app.state.trade_execution_client.aclose()
         except Exception:
             logger.exception("Failed closing TradeExecutionHttpClient.")
+
+        try:
+            if getattr(app.state, "market_data_client", None) is not None:
+                await app.state.market_data_client.aclose()
+        except Exception:
+            logger.exception("Failed closing MarketDataHttpClient.")
 
         try:
             if getattr(app.state, "redis_client", None) is not None:

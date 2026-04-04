@@ -35,27 +35,52 @@ class TradeCandleBufferRepositoryRedis:
         """
         Upsert a candle into the rolling buffer using open_time as the unique key.
 
-        This method is intentionally idempotent for the same candle window so that
-        replayed or duplicated events do not create duplicated list entries.
+        Fast path:
+        - append when the incoming candle is newer than the current tail
+        - replace tail when the incoming candle has the same open_time as the tail
+
+        Slow path:
+        - rebuild only when an out-of-order candle arrives
         """
+        key = self._build_key(stream_key)
         resolved_maxlen = int(maxlen or self._maxlen)
-        existing = await self.list_last(
+        incoming_open_time = int(candle["open_time"])
+        serialized = json.dumps(candle, separators=(",", ":"), sort_keys=True)
+
+        tail_raw = await self._redis.lindex(key, -1)
+        if tail_raw is None:
+            pipe = self._redis.pipeline()
+            pipe.rpush(key, serialized)
+            pipe.ltrim(key, -resolved_maxlen, -1)
+            await pipe.execute()
+            return
+
+        tail = json.loads(tail_raw)
+        tail_open_time = int(tail["open_time"])
+
+        if incoming_open_time > tail_open_time:
+            pipe = self._redis.pipeline()
+            pipe.rpush(key, serialized)
+            pipe.ltrim(key, -resolved_maxlen, -1)
+            await pipe.execute()
+            return
+
+        if incoming_open_time == tail_open_time:
+            length = int(await self._redis.llen(key))
+            if length <= 0:
+                await self.replace(
+                    stream_key=stream_key,
+                    candles=[candle],
+                    maxlen=resolved_maxlen,
+                )
+                return
+
+            await self._redis.lset(key, length - 1, serialized)
+            return
+
+        await self._upsert_out_of_order(
             stream_key=stream_key,
-            limit=resolved_maxlen,
-        )
-
-        merged_by_open_time: Dict[int, Dict[str, Any]] = {}
-
-        for item in existing:
-            open_time = int(item["open_time"])
-            merged_by_open_time[open_time] = item
-
-        merged_by_open_time[int(candle["open_time"])] = candle
-
-        merged = sorted(merged_by_open_time.values(), key=lambda x: int(x["open_time"]))
-        await self.replace(
-            stream_key=stream_key,
-            candles=merged[-resolved_maxlen:],
+            candle=candle,
             maxlen=resolved_maxlen,
         )
 
@@ -144,6 +169,36 @@ class TradeCandleBufferRepositoryRedis:
 
         out.sort(key=lambda x: x["stream_key"])
         return out
+
+    async def _upsert_out_of_order(
+        self,
+        *,
+        stream_key: str,
+        candle: Dict[str, Any],
+        maxlen: int,
+    ) -> None:
+        """
+        Rebuild the rolling buffer when an out-of-order candle arrives.
+
+        This path should be rare and exists mainly for replays or recovery flows.
+        """
+        existing = await self.list_last(
+            stream_key=stream_key,
+            limit=maxlen,
+        )
+
+        merged_by_open_time: Dict[int, Dict[str, Any]] = {}
+        for item in existing:
+            merged_by_open_time[int(item["open_time"])] = item
+
+        merged_by_open_time[int(candle["open_time"])] = candle
+
+        merged = sorted(merged_by_open_time.values(), key=lambda x: int(x["open_time"]))
+        await self.replace(
+            stream_key=stream_key,
+            candles=merged[-maxlen:],
+            maxlen=maxlen,
+        )
 
     def _build_key(self, stream_key: str) -> str:
         """

@@ -37,7 +37,7 @@ class TradeStrategyCacheRepositoryRedis:
         """
         key = self._build_key(stream_key)
         raw = await self._redis.get(key)
-        if not raw:
+        if raw is None:
             return None
 
         items = json.loads(raw)
@@ -50,7 +50,10 @@ class TradeStrategyCacheRepositoryRedis:
         strategies: List[TradeStrategyEntity],
     ) -> None:
         """
-        Cache active strategies for a stream_key using a short TTL.
+        Cache active strategies for a stream_key.
+
+        A long TTL is used by default, but active write paths also refresh the cache.
+        When ttl_s <= 0, the cache is stored without expiration.
         """
         key = self._build_key(stream_key)
         payload = json.dumps(
@@ -58,7 +61,12 @@ class TradeStrategyCacheRepositoryRedis:
             separators=(",", ":"),
             sort_keys=True,
         )
-        await self._redis.set(key, payload, ex=self._ttl_s)
+
+        if self._ttl_s > 0:
+            await self._redis.set(key, payload, ex=self._ttl_s)
+            return
+
+        await self._redis.set(key, payload)
 
     async def invalidate(
         self,
@@ -69,6 +77,16 @@ class TradeStrategyCacheRepositoryRedis:
         Invalidate the cached strategies for a stream_key.
         """
         await self._redis.delete(self._build_key(stream_key))
+
+    async def get_ttl(
+        self,
+        *,
+        stream_key: str,
+    ) -> int:
+        """
+        Return the current Redis TTL for a stream strategy cache key.
+        """
+        return int(await self._redis.ttl(self._build_key(stream_key)))
 
     def _build_key(self, stream_key: str) -> str:
         """
