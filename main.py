@@ -15,6 +15,9 @@ from adapters.entry.http.trigger_router import router as triggers_router
 from adapters.external.database.mongodb_client import get_mongo_client
 from adapters.external.database.trade_signal_repository_mongodb import TradeSignalRepositoryMongoDB
 from adapters.external.database.trade_strategy_repository_mongodb import TradeStrategyRepositoryMongoDB
+from adapters.external.database.trade_strategy_runtime_event_repository_mongodb import (
+    TradeStrategyRuntimeEventRepositoryMongoDB,
+)
 from adapters.external.database.trade_strategy_runtime_snapshot_repository_mongodb import (
     TradeStrategyRuntimeSnapshotRepositoryMongoDB,
 )
@@ -119,6 +122,7 @@ async def lifespan(app: FastAPI):
     await TradeStrategyRepositoryMongoDB(db).ensure_indexes()
     await TradeSignalRepositoryMongoDB(db).ensure_indexes()
     await TradeStrategyRuntimeSnapshotRepositoryMongoDB(db).ensure_indexes()
+    await TradeStrategyRuntimeEventRepositoryMongoDB(db).ensure_indexes()
 
     market_data_client = MarketDataHttpClient(base_url=settings.MARKET_DATA_BASE_URL)
 
@@ -152,10 +156,14 @@ async def lifespan(app: FastAPI):
     )
     app.state.trade_pipeline_publisher = trade_pipeline_publisher
 
+    trade_runtime_snapshot_repo = TradeStrategyRuntimeSnapshotRepositoryMongoDB(db)
+    trade_runtime_event_repo = TradeStrategyRuntimeEventRepositoryMongoDB(db)
+
     trade_candle_processor = ProcessTradeCandleClosedEventUseCase(
         strategy_repo=TradeStrategyRepositoryMongoDB(db),
         signal_repo=TradeSignalRepositoryMongoDB(db),
-        runtime_snapshot_repo=TradeStrategyRuntimeSnapshotRepositoryMongoDB(db),
+        runtime_snapshot_repo=trade_runtime_snapshot_repo,
+        runtime_event_repo=trade_runtime_event_repo,
         candle_buffer_repo=trade_candle_buffer_repo,
         market_data_client=market_data_client,
         strategy_cache_repo=trade_strategy_cache_repo,
@@ -210,7 +218,7 @@ async def lifespan(app: FastAPI):
 
     trade_signal_execution_uc = ExecuteTradeSignalPipelineUseCase(
         trade_signal_repo=TradeSignalRepositoryMongoDB(db),
-        runtime_snapshot_repo=TradeStrategyRuntimeSnapshotRepositoryMongoDB(db),
+        runtime_snapshot_repo=trade_runtime_snapshot_repo,
         trade_execution_client=trade_execution_client,
         market_data_client=market_data_client,
         notifier=notifier,

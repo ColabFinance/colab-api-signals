@@ -16,18 +16,10 @@ from core.domain.enums.trade_enums import (
 
 class TradeStrategyRuntimeSnapshotEntity(MongoEntity):
     """
-    Runtime snapshot for a trade strategy at a specific closed candle.
+    Latest runtime state for a trade strategy.
 
-    This document stores the computed operational state of the strategy after
-    evaluating the latest candle processing step.
-
-    It is used for:
-    - observability
-    - dashboards
-    - debugging
-    - carrying strategy state across candle evaluations
-
-    One document represents one strategy evaluated at one candle close.
+    This document stores the current operational state after the most recent
+    evaluated candle. It is not a historical log collection.
     """
 
     strategy_id: str

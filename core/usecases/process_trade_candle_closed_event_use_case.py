@@ -10,6 +10,9 @@ from core.domain.entities.trade_signal_entity import TradeSignalEntity
 from core.domain.entities.trade_strategy_entity import TradeStrategyEntity
 from core.repositories.trade_signal_repository import TradeSignalRepository
 from core.repositories.trade_strategy_repository import TradeStrategyRepository
+from core.repositories.trade_strategy_runtime_event_repository import (
+    TradeStrategyRuntimeEventRepository,
+)
 from core.repositories.trade_strategy_runtime_snapshot_repository import (
     TradeStrategyRuntimeSnapshotRepository,
 )
@@ -30,6 +33,7 @@ class ProcessTradeCandleClosedEventUseCase:
         strategy_repo: TradeStrategyRepository,
         signal_repo: TradeSignalRepository,
         runtime_snapshot_repo: TradeStrategyRuntimeSnapshotRepository,
+        runtime_event_repo: Optional[TradeStrategyRuntimeEventRepository],
         candle_buffer_repo: TradeCandleBufferRepositoryRedis,
         market_data_client: MarketDataHttpClient,
         strategy_cache_repo: Optional[TradeStrategyCacheRepositoryRedis] = None,
@@ -43,6 +47,7 @@ class ProcessTradeCandleClosedEventUseCase:
         self._strategy_repo = strategy_repo
         self._signal_repo = signal_repo
         self._runtime_snapshot_repo = runtime_snapshot_repo
+        self._runtime_event_repo = runtime_event_repo
         self._candle_buffer_repo = candle_buffer_repo
         self._market_data = market_data_client
         self._strategy_cache_repo = strategy_cache_repo
@@ -54,6 +59,7 @@ class ProcessTradeCandleClosedEventUseCase:
             strategy_repo=self._strategy_repo,
             signal_repo=self._signal_repo,
             runtime_snapshot_repo=self._runtime_snapshot_repo,
+            runtime_event_repo=self._runtime_event_repo,
             market_data_client=self._market_data,
             strategy_service=self._strategy_service,
             logger=self._logger,
@@ -75,7 +81,8 @@ class ProcessTradeCandleClosedEventUseCase:
         This use case is intentionally tolerant to replays because:
         - the candle buffer upsert is idempotent by open_time
         - signal persistence is idempotent by signal idempotency key
-        - runtime snapshot persistence should be upsert-based
+        - latest runtime state persistence is upsert-based
+        - runtime event persistence is idempotent by runtime event idempotency key
         """
         normalized_stream_key = str(stream_key).strip().lower()
         normalized_ts = int(ts)

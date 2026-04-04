@@ -14,6 +14,9 @@ from core.domain.entities.trade_strategy_entity import (
 from core.domain.enums.trade_enums import TradeStrategyStatus
 from core.repositories.trade_signal_repository import TradeSignalRepository
 from core.repositories.trade_strategy_repository import TradeStrategyRepository
+from core.repositories.trade_strategy_runtime_event_repository import (
+    TradeStrategyRuntimeEventRepository,
+)
 from core.repositories.trade_strategy_runtime_snapshot_repository import (
     TradeStrategyRuntimeSnapshotRepository,
 )
@@ -22,12 +25,13 @@ from core.repositories.trade_strategy_runtime_snapshot_repository import (
 @dataclass
 class TradeStrategyUseCase:
     """
-    Application use case for managing trade strategies and reading generated trade signals.
+    Application use case for managing trade strategies and reading runtime/signal data.
     """
 
     strategy_repo: TradeStrategyRepository
     signal_repo: TradeSignalRepository
     runtime_snapshot_repo: TradeStrategyRuntimeSnapshotRepository
+    runtime_event_repo: TradeStrategyRuntimeEventRepository
 
     async def ensure_indexes(self) -> None:
         """
@@ -36,6 +40,7 @@ class TradeStrategyUseCase:
         await self.strategy_repo.ensure_indexes()
         await self.signal_repo.ensure_indexes()
         await self.runtime_snapshot_repo.ensure_indexes()
+        await self.runtime_event_repo.ensure_indexes()
 
     async def create_strategy(self, data: TradeStrategyCreateDTO) -> TradeStrategyEntity:
         """
@@ -298,20 +303,20 @@ class TradeStrategyUseCase:
 
     async def get_latest_runtime_snapshot(self, *, strategy_id: str):
         """
-        Fetch the latest runtime snapshot for a strategy.
+        Fetch the latest runtime state for a strategy.
         """
         return await self.runtime_snapshot_repo.get_latest_by_strategy_id(str(strategy_id))
 
-    async def list_runtime_snapshots(
+    async def list_runtime_events(
         self,
         *,
         strategy_id: str,
         limit: int = 200,
     ):
         """
-        List runtime snapshot history for a strategy.
+        List runtime events for a strategy.
         """
-        return await self.runtime_snapshot_repo.list_by_strategy_id(
+        return await self.runtime_event_repo.list_last_by_strategy_id(
             strategy_id=str(strategy_id),
             limit=int(limit),
         )
