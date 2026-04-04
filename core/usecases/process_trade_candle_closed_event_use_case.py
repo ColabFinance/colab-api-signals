@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from adapters.external.market_data.market_data_http_client import MarketDataHttpClient
 from adapters.external.redis.trade_candle_buffer_repository_redis import TradeCandleBufferRepositoryRedis
+from adapters.external.redis.trade_strategy_cache_repository_redis import TradeStrategyCacheRepositoryRedis
 from core.domain.entities.trade_signal_entity import TradeSignalEntity
 from core.domain.entities.trade_strategy_entity import TradeStrategyEntity
 from core.repositories.trade_signal_repository import TradeSignalRepository
@@ -12,7 +13,6 @@ from core.repositories.trade_strategy_repository import TradeStrategyRepository
 from core.repositories.trade_strategy_runtime_snapshot_repository import (
     TradeStrategyRuntimeSnapshotRepository,
 )
-from core.repositories.trade_trigger_event_repository import TradeTriggerEventRepository
 from core.services.atr_two_stage_trade_strategy_service import AtrTwoStageTradeStrategyService
 from core.usecases.evaluate_active_trade_strategies_use_case import (
     EvaluateActiveTradeStrategiesUseCase,
@@ -21,35 +21,33 @@ from core.usecases.evaluate_active_trade_strategies_use_case import (
 
 class ProcessTradeCandleClosedEventUseCase:
     """
-    Process a closed trade candle event from Redis Streams or a legacy fallback trigger.
+    Process a closed trade candle event inside the evaluation pipeline.
     """
 
     def __init__(
         self,
         *,
-        trigger_event_repo: TradeTriggerEventRepository,
         strategy_repo: TradeStrategyRepository,
         signal_repo: TradeSignalRepository,
         runtime_snapshot_repo: TradeStrategyRuntimeSnapshotRepository,
         candle_buffer_repo: TradeCandleBufferRepositoryRedis,
         market_data_client: MarketDataHttpClient,
+        strategy_cache_repo: Optional[TradeStrategyCacheRepositoryRedis] = None,
         strategy_service: Optional[AtrTwoStageTradeStrategyService] = None,
         logger: Optional[logging.Logger] = None,
-        signal_waker: Optional[Callable[[], None]] = None,
         buffer_maxlen: int = 2000,
     ) -> None:
         """
-        Initialize the trade candle event processor.
+        Initialize the trade candle evaluation processor.
         """
-        self._trigger_event_repo = trigger_event_repo
         self._strategy_repo = strategy_repo
         self._signal_repo = signal_repo
         self._runtime_snapshot_repo = runtime_snapshot_repo
         self._candle_buffer_repo = candle_buffer_repo
         self._market_data = market_data_client
+        self._strategy_cache_repo = strategy_cache_repo
         self._strategy_service = strategy_service or AtrTwoStageTradeStrategyService()
         self._logger = logger or logging.getLogger(self.__class__.__name__)
-        self._signal_waker = signal_waker
         self._buffer_maxlen = int(buffer_maxlen)
 
         self._evaluator = EvaluateActiveTradeStrategiesUseCase(
@@ -69,10 +67,15 @@ class ProcessTradeCandleClosedEventUseCase:
         source: str,
         symbol: str,
         interval: str,
-        candle: Optional[Dict[str, Any]] = None,
+        candle: Optional[Dict[str, object]] = None,
     ) -> List[TradeSignalEntity]:
         """
         Process a single closed candle event end-to-end.
+
+        This use case is intentionally tolerant to replays because:
+        - the candle buffer upsert is idempotent by open_time
+        - signal persistence is idempotent by signal idempotency key
+        - runtime snapshot persistence should be upsert-based
         """
         normalized_stream_key = str(stream_key).strip().lower()
         normalized_ts = int(ts)
@@ -95,17 +98,8 @@ class ProcessTradeCandleClosedEventUseCase:
                 candle=normalized_candle,
                 maxlen=self._buffer_maxlen,
             )
-        
-        is_new = await self._trigger_event_repo.mark_if_new(normalized_stream_key, normalized_ts)
-        if not is_new:
-            self._logger.debug(
-                "Duplicate trade candle event ignored for evaluation. stream_key=%s ts=%s",
-                normalized_stream_key,
-                normalized_ts,
-            )
-            return []
 
-        strategies = await self._strategy_repo.get_active_by_stream_key(normalized_stream_key)
+        strategies = await self._get_active_strategies(normalized_stream_key)
         if not strategies:
             return []
 
@@ -144,7 +138,7 @@ class ProcessTradeCandleClosedEventUseCase:
             )
             return []
 
-        signals = await self._evaluator.execute_for_stream(
+        return await self._evaluator.execute_for_stream(
             stream_key=normalized_stream_key,
             ts=normalized_ts,
             source=normalized_source,
@@ -154,10 +148,25 @@ class ProcessTradeCandleClosedEventUseCase:
             strategies=strategies,
         )
 
-        if signals and self._signal_waker is not None:
-            self._signal_waker()
+    async def _get_active_strategies(
+        self,
+        stream_key: str,
+    ) -> List[TradeStrategyEntity]:
+        """
+        Load active strategies for a stream using Redis cache when available.
+        """
+        if self._strategy_cache_repo is not None:
+            cached = await self._strategy_cache_repo.get_active_by_stream_key(stream_key=stream_key)
+            if cached is not None:
+                return cached
 
-        return signals
+        strategies = await self._strategy_repo.get_active_by_stream_key(stream_key)
+        if self._strategy_cache_repo is not None:
+            await self._strategy_cache_repo.set_active_by_stream_key(
+                stream_key=stream_key,
+                strategies=strategies,
+            )
+        return strategies
 
     async def _bootstrap_candles(
         self,
@@ -168,9 +177,9 @@ class ProcessTradeCandleClosedEventUseCase:
         interval: str,
         required_limit: int,
         buffer_target_len: int,
-        latest_candle: Optional[Dict[str, Any]],
+        latest_candle: Optional[Dict[str, object]],
         ts: int,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[Dict[str, object]]:
         """
         Bootstrap the rolling buffer from api-market-data only when the hot buffer is insufficient.
         """
@@ -225,13 +234,13 @@ class ProcessTradeCandleClosedEventUseCase:
     def _normalize_candle(
         self,
         *,
-        candle: Optional[Dict[str, Any]],
+        candle: Optional[Dict[str, object]],
         stream_key: str,
         source: str,
         symbol: str,
         interval: str,
         ts: int,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[Dict[str, object]]:
         """
         Normalize an incoming candle payload into a stable dictionary shape.
         """
@@ -278,14 +287,14 @@ class ProcessTradeCandleClosedEventUseCase:
     def _merge_latest_candle(
         self,
         *,
-        candles: List[Dict[str, Any]],
-        latest_candle: Dict[str, Any],
+        candles: List[Dict[str, object]],
+        latest_candle: Dict[str, object],
         limit: int,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[Dict[str, object]]:
         """
         Merge the latest candle into an ascending candle window and keep only the last N items.
         """
-        merged_by_open_time: Dict[int, Dict[str, Any]] = {}
+        merged_by_open_time: Dict[int, Dict[str, object]] = {}
 
         for item in candles:
             open_time = self._safe_int(item.get("open_time"))
@@ -300,7 +309,7 @@ class ProcessTradeCandleClosedEventUseCase:
         merged = sorted(merged_by_open_time.values(), key=lambda x: int(x["open_time"]))
         return merged[-int(limit):]
 
-    def _coerce_bool(self, value: Any, *, default: bool) -> bool:
+    def _coerce_bool(self, value: object, *, default: bool) -> bool:
         """
         Coerce an arbitrary value into a boolean.
         """
@@ -310,7 +319,7 @@ class ProcessTradeCandleClosedEventUseCase:
             return value
         return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
-    def _safe_int(self, value: Any) -> Optional[int]:
+    def _safe_int(self, value: object) -> Optional[int]:
         """
         Safely convert an arbitrary value to int.
         """
@@ -318,7 +327,7 @@ class ProcessTradeCandleClosedEventUseCase:
             return None
         return int(value)
 
-    def _safe_float(self, value: Any) -> Optional[float]:
+    def _safe_float(self, value: object) -> Optional[float]:
         """
         Safely convert an arbitrary value to float.
         """

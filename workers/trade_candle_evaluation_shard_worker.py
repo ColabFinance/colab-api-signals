@@ -1,20 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, Dict
 
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
+from adapters.external.redis.trade_pipeline_stream_publisher import TradePipelineStreamPublisher
 from core.usecases.process_trade_candle_closed_event_use_case import (
     ProcessTradeCandleClosedEventUseCase,
 )
 
 
-class TradeCandleStreamConsumerWorker:
+class TradeCandleEvaluationShardWorker:
     """
-    Consume closed trade candle events from Redis Streams.
+    Pipeline 2 worker that processes one evaluation shard sequentially.
     """
 
     def __init__(
@@ -22,6 +24,8 @@ class TradeCandleStreamConsumerWorker:
         *,
         redis_client: Redis,
         processor: ProcessTradeCandleClosedEventUseCase,
+        publisher: TradePipelineStreamPublisher,
+        shard_id: int,
         stream_name: str,
         group_name: str,
         consumer_name: str,
@@ -30,10 +34,12 @@ class TradeCandleStreamConsumerWorker:
         logger: logging.Logger | None = None,
     ) -> None:
         """
-        Initialize the Redis Stream consumer worker.
+        Initialize the evaluation shard worker.
         """
         self._redis = redis_client
         self._processor = processor
+        self._publisher = publisher
+        self._shard_id = int(shard_id)
         self._stream_name = str(stream_name).strip()
         self._group_name = str(group_name).strip()
         self._consumer_name = str(consumer_name).strip()
@@ -46,7 +52,7 @@ class TradeCandleStreamConsumerWorker:
 
     async def start(self) -> None:
         """
-        Create the consumer group if needed and start the background loop.
+        Ensure the consumer group exists and start the background loop.
         """
         if self._task is not None and not self._task.done():
             return
@@ -55,7 +61,8 @@ class TradeCandleStreamConsumerWorker:
         self._stop_event.clear()
         self._task = asyncio.create_task(self._run_loop())
         self._logger.info(
-            "Trade candle consumer started. stream=%s group=%s consumer=%s",
+            "Trade candle evaluation shard worker started. shard=%s stream=%s group=%s consumer=%s",
+            self._shard_id,
             self._stream_name,
             self._group_name,
             self._consumer_name,
@@ -63,7 +70,7 @@ class TradeCandleStreamConsumerWorker:
 
     async def stop(self) -> None:
         """
-        Stop the background consumer loop.
+        Stop the background loop.
         """
         self._stop_event.set()
 
@@ -73,7 +80,7 @@ class TradeCandleStreamConsumerWorker:
         try:
             await asyncio.wait_for(self._task, timeout=10)
         except asyncio.TimeoutError:
-            self._logger.warning("Timeout waiting trade candle consumer to stop; cancelling task.")
+            self._logger.warning("Timeout waiting trade candle evaluation shard worker to stop; cancelling task.")
             self._task.cancel()
         finally:
             self._task = None
@@ -105,7 +112,7 @@ class TradeCandleStreamConsumerWorker:
 
     async def _run_loop(self) -> None:
         """
-        Run the consumer loop, first draining pending messages and then reading new ones.
+        Run the evaluation shard loop.
         """
         while not self._stop_event.is_set():
             try:
@@ -117,16 +124,16 @@ class TradeCandleStreamConsumerWorker:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._logger.exception("Trade candle consumer loop error: %s", exc)
+                self._logger.exception(
+                    "Trade candle evaluation shard loop error. shard=%s err=%s",
+                    self._shard_id,
+                    exc,
+                )
                 await asyncio.sleep(1.0)
 
     async def _consume_once(self, *, stream_cursor: str, block_ms: int) -> bool:
         """
-        Consume a single batch from the Redis Stream.
-
-        Returns:
-            True when at least one real message was processed.
-            False when Redis returned no messages for this read.
+        Consume and process one batch from the evaluation shard stream.
         """
         items = await self._redis.xreadgroup(
             groupname=self._group_name,
@@ -151,14 +158,15 @@ class TradeCandleStreamConsumerWorker:
                     payload = self._parse_event(fields)
 
                     self._logger.info(
-                        "Processing trade candle event. message_id=%s stream_key=%s ts=%s cursor=%s",
+                        "Evaluating candle on shard. shard=%s message_id=%s stream_key=%s ts=%s cursor=%s",
+                        self._shard_id,
                         message_id,
                         payload["stream_key"],
                         payload["ts"],
                         stream_cursor,
                     )
 
-                    await self._processor.execute(
+                    signals = await self._processor.execute(
                         stream_key=payload["stream_key"],
                         ts=payload["ts"],
                         source=payload["source"],
@@ -167,17 +175,23 @@ class TradeCandleStreamConsumerWorker:
                         candle=payload["candle"],
                     )
 
+                    for signal in signals:
+                        await self._publisher.publish_generated_signal(signal=signal)
+
                     await self._redis.xack(self._stream_name, self._group_name, message_id)
 
                     self._logger.info(
-                        "Trade candle event acked. message_id=%s stream_key=%s ts=%s",
+                        "Evaluation shard message acked. shard=%s message_id=%s stream_key=%s ts=%s signals=%s",
+                        self._shard_id,
                         message_id,
                         payload["stream_key"],
                         payload["ts"],
+                        len(signals),
                     )
                 except Exception as exc:
                     self._logger.exception(
-                        "Failed processing Redis trade candle event. stream=%s message_id=%s err=%s",
+                        "Failed processing evaluation shard event. shard=%s stream=%s message_id=%s err=%s",
+                        self._shard_id,
                         self._stream_name,
                         message_id,
                         exc,
@@ -188,29 +202,14 @@ class TradeCandleStreamConsumerWorker:
 
     def _parse_event(self, fields: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Parse a Redis Stream event payload into normalized metadata plus candle data.
+        Parse an evaluation-shard event from Redis Streams.
         """
         stream_key = str(fields["stream_key"]).strip().lower()
         ts = int(fields["ts"])
         source = str(fields["source"]).strip().lower()
         symbol = str(fields["symbol"]).strip().upper()
         interval = str(fields["interval"]).strip().lower()
-
-        candle = {
-            "stream_key": stream_key,
-            "source": source,
-            "symbol": symbol,
-            "interval": interval,
-            "open_time": int(fields["open_time"]),
-            "close_time": int(fields["close_time"]),
-            "open": float(fields["open"]),
-            "high": float(fields["high"]),
-            "low": float(fields["low"]),
-            "close": float(fields["close"]),
-            "volume": float(fields.get("volume", 0.0)),
-            "trades": int(fields.get("trades", 0)),
-            "is_closed": self._to_bool(fields.get("is_closed", "1")),
-        }
+        candle = json.loads(str(fields["candle_json"]))
 
         return {
             "stream_key": stream_key,
@@ -220,11 +219,3 @@ class TradeCandleStreamConsumerWorker:
             "interval": interval,
             "candle": candle,
         }
-
-    def _to_bool(self, value: Any) -> bool:
-        """
-        Convert a string-like Redis value into a boolean.
-        """
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().lower() in {"1", "true", "yes", "y"}

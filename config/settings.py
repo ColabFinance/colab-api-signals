@@ -29,16 +29,45 @@ class Settings:
     TRADE_EXECUTION_BASE_URL: str = os.getenv("TRADE_EXECUTION_BASE_URL", "http://172.17.0.1:8002")
 
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://host.docker.internal:6379/0")
+
+    # Pipeline 1 source stream
     REDIS_TRADE_CANDLE_STREAM: str = os.getenv("REDIS_TRADE_CANDLE_STREAM", "trade.candle.closed.v1")
-    REDIS_TRADE_CANDLE_GROUP: str = os.getenv("REDIS_TRADE_CANDLE_GROUP", "api-signals-trade")
-    REDIS_TRADE_CANDLE_CONSUMER_NAME: str = os.getenv(
-        "REDIS_TRADE_CANDLE_CONSUMER_NAME",
-        f"{os.getenv('APP_NAME', 'api-signals')}-trade",
+    REDIS_TRADE_CANDLE_INGEST_GROUP: str = os.getenv("REDIS_TRADE_CANDLE_INGEST_GROUP", "api-signals-trade-ingest")
+    REDIS_TRADE_CANDLE_INGEST_CONSUMER_NAME: str = os.getenv(
+        "REDIS_TRADE_CANDLE_INGEST_CONSUMER_NAME",
+        f"{os.getenv('APP_NAME', 'api-signals')}-trade-ingest",
     )
-    TRADE_CANDLE_STREAM_BLOCK_MS: int = int(os.getenv("TRADE_CANDLE_STREAM_BLOCK_MS", "5000"))
-    TRADE_CANDLE_STREAM_READ_COUNT: int = int(os.getenv("TRADE_CANDLE_STREAM_READ_COUNT", "1"))
+    REDIS_TRADE_CANDLE_STREAM_BLOCK_MS: int = int(os.getenv("REDIS_TRADE_CANDLE_STREAM_BLOCK_MS", "5000"))
+    REDIS_TRADE_CANDLE_STREAM_READ_COUNT: int = int(os.getenv("REDIS_TRADE_CANDLE_STREAM_READ_COUNT", "50"))
+
+    # Pipeline 2 evaluation shards
+    REDIS_TRADE_EVAL_SHARD_COUNT: int = int(os.getenv("REDIS_TRADE_EVAL_SHARD_COUNT", "4"))
+    REDIS_TRADE_EVAL_STREAM_PREFIX: str = os.getenv("REDIS_TRADE_EVAL_STREAM_PREFIX", "trade.candle.eval.shard")
+    REDIS_TRADE_EVAL_GROUP_PREFIX: str = os.getenv("REDIS_TRADE_EVAL_GROUP_PREFIX", "api-signals-trade-eval-shard")
+    REDIS_TRADE_EVAL_CONSUMER_PREFIX: str = os.getenv(
+        "REDIS_TRADE_EVAL_CONSUMER_PREFIX",
+        f"{os.getenv('APP_NAME', 'api-signals')}-trade-eval-shard",
+    )
+    REDIS_TRADE_EVAL_BLOCK_MS: int = int(os.getenv("REDIS_TRADE_EVAL_BLOCK_MS", "5000"))
+    REDIS_TRADE_EVAL_READ_COUNT: int = int(os.getenv("REDIS_TRADE_EVAL_READ_COUNT", "1"))
+
+    # Pipeline 3 signal execution stream
+    REDIS_TRADE_SIGNAL_STREAM: str = os.getenv("REDIS_TRADE_SIGNAL_STREAM", "trade.signal.generated.v1")
+    REDIS_TRADE_SIGNAL_GROUP: str = os.getenv("REDIS_TRADE_SIGNAL_GROUP", "api-signals-trade-exec")
+    REDIS_TRADE_SIGNAL_CONSUMER_NAME: str = os.getenv(
+        "REDIS_TRADE_SIGNAL_CONSUMER_NAME",
+        f"{os.getenv('APP_NAME', 'api-signals')}-trade-exec",
+    )
+    REDIS_TRADE_SIGNAL_BLOCK_MS: int = int(os.getenv("REDIS_TRADE_SIGNAL_BLOCK_MS", "5000"))
+    REDIS_TRADE_SIGNAL_READ_COUNT: int = int(os.getenv("REDIS_TRADE_SIGNAL_READ_COUNT", "20"))
+
+    REDIS_PIPELINE_STREAM_MAXLEN: int = int(os.getenv("REDIS_PIPELINE_STREAM_MAXLEN", "50000"))
+
     TRADE_CANDLE_BUFFER_KEY_PREFIX: str = os.getenv("TRADE_CANDLE_BUFFER_KEY_PREFIX", "trade:candles")
     TRADE_CANDLE_BUFFER_MAXLEN: int = int(os.getenv("TRADE_CANDLE_BUFFER_MAXLEN", "2000"))
+
+    TRADE_STRATEGY_CACHE_KEY_PREFIX: str = os.getenv("TRADE_STRATEGY_CACHE_KEY_PREFIX", "trade:strategies")
+    TRADE_STRATEGY_CACHE_TTL_S: int = int(os.getenv("TRADE_STRATEGY_CACHE_TTL_S", "30"))
 
     ENABLE_BACKFILL_ON_START: bool = os.getenv("ENABLE_BACKFILL_ON_START", "true").lower() == "true"
 
