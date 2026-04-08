@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.repositories.strategy_episode_repository import StrategyEpisodeRepository
+from core.repositories.strategy_episode_runtime_repository import StrategyEpisodeRuntimeRepository
 
 
 def _norm(s: Optional[str]) -> str:
@@ -26,9 +27,11 @@ def _upper_status(s: Optional[str]) -> Optional[str]:
 @dataclass
 class StrategyEpisodeUseCase:
     repo: StrategyEpisodeRepository
+    runtime_repo: StrategyEpisodeRuntimeRepository
 
     async def ensure_indexes(self) -> None:
         await self.repo.ensure_indexes()
+        await self.runtime_repo.ensure_indexes()
 
     async def list_by_vault(
         self,
@@ -88,3 +91,58 @@ class StrategyEpisodeUseCase:
             return []
 
         return await self.repo.summarize_by_vault_refs(refs=clean_refs)
+
+    async def list_runtime_by_episode(
+        self,
+        *,
+        episode_id: str,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> Tuple[List[Any], int]:
+        episode_id_n = _norm(episode_id)
+        if not episode_id_n:
+            raise ValueError("episode_id is required")
+
+        items = await self.runtime_repo.list_by_episode(
+            episode_id=episode_id_n,
+            limit=int(limit or 200),
+            offset=int(offset or 0),
+        )
+        total = await self.runtime_repo.count_by_episode(
+            episode_id=episode_id_n,
+        )
+        return items, int(total)
+
+    async def list_runtime_by_strategy(
+        self,
+        *,
+        strategy_id: str,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> Tuple[List[Any], int]:
+        strategy_id_n = _norm(strategy_id)
+        if not strategy_id_n:
+            raise ValueError("strategy_id is required")
+
+        items = await self.runtime_repo.list_by_strategy(
+            strategy_id=strategy_id_n,
+            limit=int(limit or 200),
+            offset=int(offset or 0),
+        )
+        total = await self.runtime_repo.count_by_strategy(
+            strategy_id=strategy_id_n,
+        )
+        return items, int(total)
+
+    async def get_latest_runtime_by_strategy(
+        self,
+        *,
+        strategy_id: str,
+    ) -> Optional[Any]:
+        strategy_id_n = _norm(strategy_id)
+        if not strategy_id_n:
+            raise ValueError("strategy_id is required")
+
+        return await self.runtime_repo.get_latest_by_strategy(
+            strategy_id=strategy_id_n,
+        )

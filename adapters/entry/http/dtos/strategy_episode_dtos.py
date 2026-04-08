@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class EpisodesByVaultQuery(BaseModel):
@@ -40,10 +40,41 @@ class EpisodesByVaultQuery(BaseModel):
         return value
 
 
+class EpisodeRuntimeByEpisodeQuery(BaseModel):
+    episode_id: str
+    limit: int = Field(200, ge=1, le=2000)
+    offset: int = Field(0, ge=0)
+
+    @field_validator("episode_id")
+    @classmethod
+    def validate_episode_id(cls, v: str) -> str:
+        value = (v or "").strip()
+        if not value:
+            raise ValueError("episode_id is required")
+        return value
+
+
+class EpisodeRuntimeByStrategyQuery(BaseModel):
+    strategy_id: str
+    limit: int = Field(200, ge=1, le=2000)
+    offset: int = Field(0, ge=0)
+
+    @field_validator("strategy_id")
+    @classmethod
+    def validate_strategy_id(cls, v: str) -> str:
+        value = (v or "").strip()
+        if not value:
+            raise ValueError("strategy_id is required")
+        return value
+
+
 class StrategyEpisodeOut(BaseModel):
     id: Optional[str] = None
 
     strategy_id: str
+    strategy_name: Optional[str] = None
+    strategy_onchain_id: Optional[int] = None
+
     stream_key: Optional[str] = None
     symbol: str
 
@@ -87,12 +118,106 @@ class StrategyEpisodeOut(BaseModel):
 
     metrics: Optional[Dict[str, Any]] = None
 
+    model_config = ConfigDict(extra="ignore")
+
+
+class StrategyEpisodeRuntimeOut(BaseModel):
+    id: Optional[str] = None
+
+    episode_id: str
+
+    strategy_id: str
+    strategy_name: Optional[str] = None
+    strategy_onchain_id: Optional[int] = None
+
+    stream_key: Optional[str] = None
+    source: Optional[str] = None
+    symbol: str
+    interval: Optional[str] = None
+
+    ts: int
+    open_time: Optional[int] = None
+    close_time: Optional[int] = None
+
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
+    volume: Optional[float] = None
+
+    atr: Optional[float] = None
+    atr_pct: Optional[float] = None
+
+    entry_trend_ma: Optional[float] = None
+    entry_trend_ma_prev: Optional[float] = None
+    entry_trend_ma_distance_pct: Optional[float] = None
+    entry_trend_ma_slope_pct: Optional[float] = None
+
+    exec_price: Optional[float] = None
+
+    current_pa: Optional[float] = None
+    current_pb: Optional[float] = None
+    current_side: Optional[str] = None
+    current_range_width_pct: Optional[float] = None
+    current_range_width_regime: Optional[str] = None
+
+    out_above_streak: Optional[int] = None
+    out_below_streak: Optional[int] = None
+    out_above_streak_total: Optional[int] = None
+    out_below_streak_total: Optional[int] = None
+
+    above_range: Optional[bool] = None
+    below_range: Optional[bool] = None
+
+    target_side: Optional[str] = None
+    target_range_width_pct: Optional[float] = None
+    target_range_width_regime: Optional[str] = None
+    width_delta_pct: Optional[float] = None
+
+    breakout_up_hit: Optional[bool] = None
+    breakout_down_hit: Optional[bool] = None
+    atr_rebalance_hit: Optional[bool] = None
+
+    should_close: Optional[bool] = None
+    trigger_reason: Optional[str] = None
+    last_event_bar: Optional[int] = None
+
+    entry_regime_ok: Optional[bool] = None
+    entry_context: Optional[str] = None
+
+    created_at: Optional[int] = None
+    created_at_iso: Optional[str] = None
+    updated_at: Optional[int] = None
+    updated_at_iso: Optional[str] = None
+
+    model_config = ConfigDict(extra="ignore")
+
 
 class EpisodesByVaultResponse(BaseModel):
     ok: bool = True
     message: str = "ok"
     data: List[StrategyEpisodeOut] = []
     total: Optional[int] = None
+
+
+class EpisodeRuntimeByEpisodeResponse(BaseModel):
+    ok: bool = True
+    message: str = "ok"
+    data: List[StrategyEpisodeRuntimeOut] = []
+    total: Optional[int] = None
+
+
+class EpisodeRuntimeByStrategyResponse(BaseModel):
+    ok: bool = True
+    message: str = "ok"
+    data: List[StrategyEpisodeRuntimeOut] = []
+    total: Optional[int] = None
+
+
+class EpisodeRuntimeLatestResponse(BaseModel):
+    ok: bool = True
+    message: str = "ok"
+    data: Optional[StrategyEpisodeRuntimeOut] = None
 
 
 class VaultRefIn(BaseModel):

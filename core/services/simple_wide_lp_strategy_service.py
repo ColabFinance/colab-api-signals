@@ -4,8 +4,10 @@ from dataclasses import dataclass, field
 import logging
 from typing import Any, Dict, Literal, Optional, Tuple
 
+from core.domain.entities.lp_indicator_snapshot_entity import LpIndicatorSnapshotEntity
 from core.domain.entities.strategy_entity import StrategyEntity, StrategyParams
 from core.domain.entities.strategy_episode_entity import StrategyEpisodeEntity
+from core.domain.entities.strategy_episode_runtime_entity import StrategyEpisodeRuntimeEntity
 
 
 EPS_POS = 1e-12
@@ -18,6 +20,7 @@ class LPStrategyEvaluationResult:
     should_close: bool = False
     close_reason: Optional[str] = None
     new_episode: Optional[StrategyEpisodeEntity] = None
+    runtime: Optional[StrategyEpisodeRuntimeEntity] = None
 
 
 class SimpleWideLPStrategyService:
@@ -27,9 +30,10 @@ class SimpleWideLPStrategyService:
     This service intentionally uses only what is currently available in the
     indicator snapshot:
       - close
-      - ema_fast
-      - ema_slow
       - atr_pct
+      - entry_trend_ma
+      - entry_trend_ma_distance_pct
+      - entry_trend_ma_slope_pct
       - ts
 
     It does not try to reproduce the full backtest-only pieces that require
@@ -38,6 +42,31 @@ class SimpleWideLPStrategyService:
 
     def __init__(self, logger: Optional[logging.Logger] = None) -> None:
         self._logger = logger or logging.getLogger(self.__class__.__name__)
+
+    @staticmethod
+    def _strategy_ref_id(strategy: StrategyEntity) -> str:
+        if getattr(strategy, "id", None):
+            return str(strategy.id).strip()
+        return str(strategy.name).strip()
+
+    @staticmethod
+    def _strategy_symbol(strategy: StrategyEntity, indicator_snapshot: LpIndicatorSnapshotEntity) -> str:
+        raw = str(getattr(strategy, "symbol", "") or "").strip().upper()
+        if raw:
+            return raw
+        return str(indicator_snapshot.symbol).strip().upper()
+
+    @staticmethod
+    def _strategy_source(strategy: StrategyEntity, indicator_snapshot: LpIndicatorSnapshotEntity) -> str:
+        raw = str(getattr(indicator_snapshot, "source", "") or "").strip().lower()
+        if raw:
+            return raw
+
+        stream_key = str(getattr(strategy, "stream_key", "") or "").strip().lower()
+        if stream_key:
+            return str(stream_key.split(":")[0]).strip().lower()
+
+        return ""
 
     @staticmethod
     def _ensure_valid_band(Pa: float, Pb: float, P: float) -> Tuple[float, float]:
@@ -154,54 +183,34 @@ class SimpleWideLPStrategyService:
     def _compute_entry_regime(
         self,
         *,
-        indicator_snapshot: Dict[str, Any],
+        indicator_snapshot: LpIndicatorSnapshotEntity,
         P_exec: float,
         params: StrategyParams,
     ) -> Tuple[bool, str]:
         """
         Best-effort live entry filter using only current snapshot data.
-
-        Backtest-only filters requiring rolling candle history are intentionally
-        not reproduced here yet.
         """
         if not params.entry_filters_enabled:
             return True, "filters_disabled"
 
-        close_px = float(indicator_snapshot.get("close") or P_exec or 0.0)
-        ema_fast = float(indicator_snapshot.get("ema_fast") or 0.0)
-        ema_slow = float(indicator_snapshot.get("ema_slow") or 0.0)
-
-        ma_distance_pct = 0.0
-        if ema_slow > EPS_POS:
-            ma_distance_pct = abs((close_px / ema_slow) - 1.0)
-
-        trend_spread_pct = 0.0
-        if ema_fast > EPS_POS and ema_slow > EPS_POS:
-            trend_spread_pct = abs((ema_fast / ema_slow) - 1.0)
+        ma_distance_pct = float(indicator_snapshot.entry_trend_ma_distance_pct or 0.0)
+        trend_slope_pct = float(indicator_snapshot.entry_trend_ma_slope_pct or 0.0)
 
         ok = (
             ma_distance_pct <= float(params.entry_max_ma_distance_pct)
-            and trend_spread_pct <= float(params.entry_max_ma_slope_pct)
+            and trend_slope_pct <= float(params.entry_max_ma_slope_pct)
         )
         return bool(ok), "regime_ok" if ok else "filter_failed"
 
     @staticmethod
     def _majority_metadata_for_side(side: OpenSide, params: StrategyParams) -> Tuple[str, float, float]:
-        """
-        Compatibility mapping for the current executor.
-
-        We keep `majority_on_open` populated because the pipeline still uses it
-        as a hint for swap alignment.
-        """
         if side == "down":
-            # down band => mostly cash / quote side
             return (
                 "token1",
                 float(params.breakout_down_below_share) * 100.0,
                 float(params.breakout_down_above_share) * 100.0,
             )
 
-        # up band => mostly volatile side
         return (
             "token2",
             float(params.breakout_up_above_share) * 100.0,
@@ -237,7 +246,13 @@ class SimpleWideLPStrategyService:
 
         return StrategyEpisodeEntity(
             id=f"ep_{strategy.name}_{ts}",
-            strategy_id=strategy.name,
+            strategy_id=self._strategy_ref_id(strategy),
+            strategy_name=str(strategy.name),
+            strategy_onchain_id=(
+                int(strategy.strategy_id)
+                if getattr(strategy, "strategy_id", None) is not None
+                else None
+            ),
             stream_key=strategy.stream_key,
             symbol=symbol,
             pool_type="simple_wide",
@@ -274,19 +289,161 @@ class SimpleWideLPStrategyService:
             last_atr_rebalance_bar=None,
         )
 
+    def _build_runtime(
+        self,
+        *,
+        strategy: StrategyEntity,
+        episode: StrategyEpisodeEntity,
+        indicator_snapshot: LpIndicatorSnapshotEntity,
+        P_exec: float,
+        current_side: str,
+        current_width_pct: float,
+        current_width_regime: str,
+        target_side: str,
+        target_width_pct: float,
+        target_width_regime: str,
+        out_above_streak: int,
+        out_below_streak: int,
+        out_above_streak_total: int,
+        out_below_streak_total: int,
+        width_delta_pct: float,
+        should_close: bool,
+        trigger_reason: Optional[str],
+        last_event_bar: int,
+    ) -> StrategyEpisodeRuntimeEntity:
+        params = strategy.params
+        eps = float(params.eps)
+
+        above_range = float(P_exec) > float(episode.Pb) * (1.0 + eps)
+        below_range = float(P_exec) < float(episode.Pa) * (1.0 - eps)
+
+        confirm_bars = max(1, int(params.breakout_confirm_bars))
+        breakout_up_hit = out_above_streak >= confirm_bars
+        breakout_down_hit = out_below_streak >= confirm_bars
+        atr_rebalance_hit = bool(trigger_reason and str(trigger_reason).startswith("atr_width_rebalance:"))
+
+        return StrategyEpisodeRuntimeEntity(
+            episode_id=str(episode.id),
+            strategy_id=self._strategy_ref_id(strategy),
+            strategy_name=str(strategy.name),
+            strategy_onchain_id=(
+                int(strategy.strategy_id)
+                if getattr(strategy, "strategy_id", None) is not None
+                else None
+            ),
+            stream_key=strategy.stream_key,
+            source=self._strategy_source(strategy, indicator_snapshot),
+            symbol=self._strategy_symbol(strategy, indicator_snapshot),
+            interval=indicator_snapshot.interval,
+            ts=int(indicator_snapshot.ts),
+            open_time=int(indicator_snapshot.open_time),
+            close_time=int(indicator_snapshot.close_time),
+            open=float(indicator_snapshot.open),
+            high=float(indicator_snapshot.high),
+            low=float(indicator_snapshot.low),
+            close=float(indicator_snapshot.close),
+            atr=float(indicator_snapshot.atr),
+            atr_pct=float(indicator_snapshot.atr_pct),
+            entry_trend_ma=(
+                float(indicator_snapshot.entry_trend_ma)
+                if indicator_snapshot.entry_trend_ma is not None
+                else None
+            ),
+            entry_trend_ma_prev=(
+                float(indicator_snapshot.entry_trend_ma_prev)
+                if indicator_snapshot.entry_trend_ma_prev is not None
+                else None
+            ),
+            entry_trend_ma_distance_pct=(
+                float(indicator_snapshot.entry_trend_ma_distance_pct)
+                if indicator_snapshot.entry_trend_ma_distance_pct is not None
+                else None
+            ),
+            entry_trend_ma_slope_pct=(
+                float(indicator_snapshot.entry_trend_ma_slope_pct)
+                if indicator_snapshot.entry_trend_ma_slope_pct is not None
+                else None
+            ),
+            exec_price=float(P_exec),
+            current_pa=float(episode.Pa),
+            current_pb=float(episode.Pb),
+            current_side=str(current_side),
+            current_range_width_pct=float(current_width_pct),
+            current_range_width_regime=str(current_width_regime),
+            out_above_streak=int(out_above_streak),
+            out_below_streak=int(out_below_streak),
+            out_above_streak_total=int(out_above_streak_total),
+            out_below_streak_total=int(out_below_streak_total),
+            above_range=bool(above_range),
+            below_range=bool(below_range),
+            target_side=str(target_side),
+            target_range_width_pct=float(target_width_pct),
+            target_range_width_regime=str(target_width_regime),
+            width_delta_pct=float(width_delta_pct),
+            breakout_up_hit=bool(breakout_up_hit),
+            breakout_down_hit=bool(breakout_down_hit),
+            atr_rebalance_hit=bool(atr_rebalance_hit),
+            should_close=bool(should_close),
+            trigger_reason=trigger_reason,
+            last_event_bar=int(last_event_bar),
+            entry_regime_ok=episode.entry_regime_ok,
+            entry_context=episode.entry_context,
+        )
+
+    def build_initial_runtime(
+        self,
+        *,
+        strategy: StrategyEntity,
+        episode: StrategyEpisodeEntity,
+        indicator_snapshot: LpIndicatorSnapshotEntity,
+        P_exec: float,
+    ) -> StrategyEpisodeRuntimeEntity:
+        current_width_pct = float(
+            episode.range_width_pct
+            if episode.range_width_pct is not None
+            else (
+                episode.band_total_width_pct
+                if episode.band_total_width_pct is not None
+                else strategy.params.fixed_range_width_pct
+            )
+        )
+        current_width_regime = str(episode.range_width_regime or "fixed")
+        current_side = str(episode.open_side or episode.mode_on_open or strategy.params.initial_side)
+
+        return self._build_runtime(
+            strategy=strategy,
+            episode=episode,
+            indicator_snapshot=indicator_snapshot,
+            P_exec=float(P_exec),
+            current_side=current_side,
+            current_width_pct=current_width_pct,
+            current_width_regime=current_width_regime,
+            target_side=current_side,
+            target_width_pct=current_width_pct,
+            target_width_regime=current_width_regime,
+            out_above_streak=int(episode.out_above_streak or 0),
+            out_below_streak=int(episode.out_below_streak or 0),
+            out_above_streak_total=int(episode.out_above_streak_total or 0),
+            out_below_streak_total=int(episode.out_below_streak_total or 0),
+            width_delta_pct=0.0,
+            should_close=False,
+            trigger_reason=None,
+            last_event_bar=int(episode.last_event_bar or 0),
+        )
+
     def build_initial_episode(
         self,
         *,
         strategy: StrategyEntity,
-        indicator_snapshot: Dict[str, Any],
+        indicator_snapshot: LpIndicatorSnapshotEntity,
         symbol: str,
         P_signal: float,
         P_exec: float,
         ts: int,
     ) -> StrategyEpisodeEntity:
         params = strategy.params
-        atr_pct = float(indicator_snapshot.get("atr_pct") or 0.0)
-        created_at_iso = indicator_snapshot.get("created_at_iso")
+        atr_pct = float(indicator_snapshot.atr_pct or 0.0)
+        created_at_iso = indicator_snapshot.created_at_iso
 
         target_width_pct, target_width_regime = self._select_width_rule(atr_pct, params)
         entry_regime_ok, entry_context = self._compute_entry_regime(
@@ -328,15 +485,15 @@ class SimpleWideLPStrategyService:
         *,
         strategy: StrategyEntity,
         current: StrategyEpisodeEntity,
-        indicator_snapshot: Dict[str, Any],
+        indicator_snapshot: LpIndicatorSnapshotEntity,
         symbol: str,
         P_signal: float,
         P_exec: float,
         ts: int,
     ) -> LPStrategyEvaluationResult:
         params = strategy.params
-        atr_pct = float(indicator_snapshot.get("atr_pct") or 0.0)
-        created_at_iso = indicator_snapshot.get("created_at_iso")
+        atr_pct = float(indicator_snapshot.atr_pct or 0.0)
+        created_at_iso = indicator_snapshot.created_at_iso
 
         current_side = str(current.open_side or current.mode_on_open or params.initial_side).lower()
         if current_side not in ("down", "up"):
@@ -415,7 +572,30 @@ class SimpleWideLPStrategyService:
                 next_side = "down"
 
         if not trigger_reason:
-            return LPStrategyEvaluationResult(current_updates=updates)
+            runtime = self._build_runtime(
+                strategy=strategy,
+                episode=current,
+                indicator_snapshot=indicator_snapshot,
+                P_exec=float(P_exec),
+                current_side=current_side,
+                current_width_pct=current_width_pct,
+                current_width_regime=current_regime_name,
+                target_side=current_side,
+                target_width_pct=float(target_width_pct),
+                target_width_regime=target_width_regime,
+                out_above_streak=out_above_streak,
+                out_below_streak=out_below_streak,
+                out_above_streak_total=out_above_streak_total,
+                out_below_streak_total=out_below_streak_total,
+                width_delta_pct=float(width_delta),
+                should_close=False,
+                trigger_reason=None,
+                last_event_bar=i_since_open,
+            )
+            return LPStrategyEvaluationResult(
+                current_updates=updates,
+                runtime=runtime,
+            )
 
         entry_regime_ok, entry_context = self._compute_entry_regime(
             indicator_snapshot=indicator_snapshot,
@@ -451,9 +631,31 @@ class SimpleWideLPStrategyService:
             created_at_iso=created_at_iso,
         )
 
+        runtime = self._build_runtime(
+            strategy=strategy,
+            episode=current,
+            indicator_snapshot=indicator_snapshot,
+            P_exec=float(P_exec),
+            current_side=current_side,
+            current_width_pct=current_width_pct,
+            current_width_regime=current_regime_name,
+            target_side=next_side,
+            target_width_pct=float(width_to_open),
+            target_width_regime=width_regime_to_open,
+            out_above_streak=out_above_streak,
+            out_below_streak=out_below_streak,
+            out_above_streak_total=out_above_streak_total,
+            out_below_streak_total=out_below_streak_total,
+            width_delta_pct=float(width_delta),
+            should_close=True,
+            trigger_reason=trigger_reason,
+            last_event_bar=i_since_open,
+        )
+
         return LPStrategyEvaluationResult(
             current_updates=updates,
             should_close=True,
             close_reason=trigger_reason,
             new_episode=new_episode,
+            runtime=runtime,
         )

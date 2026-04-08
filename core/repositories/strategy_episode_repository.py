@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from core.domain.entities.strategy_episode_entity import StrategyEpisodeEntity
+from core.domain.entities.strategy_episode_runtime_entity import StrategyEpisodeRuntimeEntity
 
 
 class StrategyEpisodeRepository(ABC):
@@ -33,6 +34,28 @@ class StrategyEpisodeRepository(ABC):
 
     @abstractmethod
     async def append_execution_log(self, episode_id: str, log: Dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def upsert_runtime(self, runtime: StrategyEpisodeRuntimeEntity) -> StrategyEpisodeRuntimeEntity:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_runtime_by_episode(
+        self,
+        episode_id: str,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> List[StrategyEpisodeRuntimeEntity | None]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_runtime_by_strategy(
+        self,
+        strategy_id: str,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> List[StrategyEpisodeRuntimeEntity | None]:
         raise NotImplementedError
 
     @abstractmethod

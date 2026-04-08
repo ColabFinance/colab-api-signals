@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, List
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from core.domain.entities.strategy_episode_entity import StrategyEpisodeEntity
+from core.domain.entities.strategy_episode_runtime_entity import StrategyEpisodeRuntimeEntity
 from core.repositories.strategy_episode_repository import StrategyEpisodeRepository
 
 
@@ -182,15 +183,35 @@ def _episode_time_for_recent_window(doc: Dict[str, Any]) -> Optional[int]:
 
 class StrategyEpisodeRepositoryMongoDB(StrategyEpisodeRepository):
     COLLECTION = "strategy_episodes"
+    RUNTIME_COLLECTION = "strategy_episode_runtimes"
 
     def __init__(self, db: AsyncIOMotorDatabase):
         self._col = db[self.COLLECTION]
+        self._runtime_col = db[self.RUNTIME_COLLECTION]
 
     async def ensure_indexes(self) -> None:
         await self._col.create_index([("strategy_id", 1), ("status", 1)], name="ix_strategy_status")
         await self._col.create_index([("strategy_id", 1), ("open_time", -1)], name="ix_strategy_open_time")
         await self._col.create_index([("dex", 1), ("alias", 1), ("open_time", -1)], name="ix_dex_alias_open_time")
         await self._col.create_index([("dex", 1), ("alias", 1), ("status", 1), ("open_time", -1)], name="ix_dex_alias_status_open_time")
+
+        await self._runtime_col.create_index(
+            [("strategy_id", 1), ("ts", 1)],
+            unique=True,
+            name="ux_strategy_episode_runtime_strategy_ts",
+        )
+        await self._runtime_col.create_index(
+            [("episode_id", 1), ("ts", -1)],
+            name="ix_strategy_episode_runtime_episode_ts_desc",
+        )
+        await self._runtime_col.create_index(
+            [("strategy_id", 1), ("ts", -1)],
+            name="ix_strategy_episode_runtime_strategy_ts_desc",
+        )
+        await self._runtime_col.create_index(
+            [("stream_key", 1), ("ts", -1)],
+            name="ix_strategy_episode_runtime_stream_ts_desc",
+        )
 
     async def get_open_by_strategy(self, strategy_id: str) -> Optional[StrategyEpisodeEntity]:
         doc = await self._col.find_one({"strategy_id": strategy_id, "status": "OPEN"})
@@ -248,6 +269,61 @@ class StrategyEpisodeRepositoryMongoDB(StrategyEpisodeRepository):
             {"_id": episode_id},
             {"$push": {"execution_log": final_log}},
         )
+
+    async def upsert_runtime(self, runtime: StrategyEpisodeRuntimeEntity) -> StrategyEpisodeRuntimeEntity:
+        now_ms = int(time.time() * 1000)
+        now_iso = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+
+        payload = runtime.to_mongo()
+        payload["updated_at"] = now_ms
+        payload["updated_at_iso"] = now_iso
+
+        await self._runtime_col.update_one(
+            {"strategy_id": runtime.strategy_id, "ts": int(runtime.ts)},
+            {
+                "$set": payload,
+                "$setOnInsert": {
+                    "created_at": now_ms,
+                    "created_at_iso": now_iso,
+                },
+            },
+            upsert=True,
+        )
+
+        stored = await self._runtime_col.find_one(
+            {"strategy_id": runtime.strategy_id, "ts": int(runtime.ts)}
+        )
+        return StrategyEpisodeRuntimeEntity.from_mongo(stored)
+
+    async def list_runtime_by_episode(
+        self,
+        episode_id: str,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> List[StrategyEpisodeRuntimeEntity | None]:
+        cursor = (
+            self._runtime_col.find({"episode_id": str(episode_id)})
+            .sort([("ts", -1), ("created_at", -1)])
+            .skip(int(offset))
+            .limit(int(limit))
+        )
+        docs = await cursor.to_list(length=int(limit))
+        return [StrategyEpisodeRuntimeEntity.from_mongo(d) for d in docs if d]
+
+    async def list_runtime_by_strategy(
+        self,
+        strategy_id: str,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> List[StrategyEpisodeRuntimeEntity | None]:
+        cursor = (
+            self._runtime_col.find({"strategy_id": str(strategy_id)})
+            .sort([("ts", -1), ("created_at", -1)])
+            .skip(int(offset))
+            .limit(int(limit))
+        )
+        docs = await cursor.to_list(length=int(limit))
+        return [StrategyEpisodeRuntimeEntity.from_mongo(d) for d in docs if d]
 
     async def list_by_vault(
         self,

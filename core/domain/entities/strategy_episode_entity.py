@@ -7,17 +7,18 @@ from .base_entity import MongoEntity
 
 class StrategyEpisodeEntity(MongoEntity):
     strategy_id: str
+    strategy_name: Optional[str] = None
+    strategy_onchain_id: Optional[int] = None
+
     stream_key: Optional[str] = None
     symbol: str
 
-    # kept for compatibility with existing pipeline/logging
     pool_type: str = "simple_wide"
     mode_on_open: str
     majority_on_open: str
     target_major_pct: float
     target_minor_pct: float
 
-    # new live LP fields
     open_side: Optional[str] = None
     range_width_pct: Optional[float] = None
     range_width_regime: Optional[str] = None
