@@ -80,5 +80,14 @@ class Settings:
     ADMIN_WALLETS: str = os.getenv("ADMIN_WALLETS", "")
     PRIVY_APP_SECRET: str = os.getenv("PRIVY_APP_SECRET", "")
 
+    REDIS_LP_EVAL_STREAM_PREFIX: str = os.getenv("REDIS_LP_EVAL_STREAM_PREFIX", "stream:signals:lp:eval")
+    REDIS_LP_EVAL_SHARD_COUNT: int = int(os.getenv("REDIS_LP_EVAL_SHARD_COUNT", "4"))
+    REDIS_LP_EVAL_BLOCK_MS: int = int(os.getenv("REDIS_LP_EVAL_BLOCK_MS", "5000"))
+    REDIS_LP_EVAL_READ_COUNT: int = int(os.getenv("REDIS_LP_EVAL_READ_COUNT", "100"))
+    REDIS_LP_EVAL_GROUP_PREFIX: str = os.getenv("REDIS_LP_EVAL_GROUP_PREFIX", "group:signals:lp:eval")
+    REDIS_LP_EVAL_CONSUMER_PREFIX: str = os.getenv("REDIS_LP_EVAL_CONSUMER_PREFIX", "consumer:signals:lp:eval")
+
+    LP_CANDLE_BUFFER_KEY_PREFIX: str = os.getenv("LP_CANDLE_BUFFER_KEY_PREFIX", "signals:lp:candles")
+    LP_CANDLE_BUFFER_MAXLEN: int = int(os.getenv("LP_CANDLE_BUFFER_MAXLEN", "3000"))
 
 settings = Settings()

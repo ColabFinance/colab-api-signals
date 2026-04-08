@@ -1,20 +1,31 @@
-# core/domain/entities/strategy_episode_entity.py
 from typing import Any, Dict, List, Optional
 from pydantic import ConfigDict, Field
 
 from core.domain.entities.strategy_entity import StrategyParams
 from .base_entity import MongoEntity
 
+
 class StrategyEpisodeEntity(MongoEntity):
     strategy_id: str
     stream_key: Optional[str] = None
     symbol: str
 
-    pool_type: str = "standard"
+    # kept for compatibility with existing pipeline/logging
+    pool_type: str = "simple_wide"
     mode_on_open: str
     majority_on_open: str
     target_major_pct: float
     target_minor_pct: float
+
+    # new live LP fields
+    open_side: Optional[str] = None
+    range_width_pct: Optional[float] = None
+    range_width_regime: Optional[str] = None
+    atr_pct_at_open: Optional[float] = None
+    entry_regime_ok: Optional[bool] = None
+    entry_context: Optional[str] = None
+    atr_rebalances: int = 0
+    last_atr_rebalance_bar: Optional[int] = None
 
     open_time: int
     open_time_iso: Optional[str] = None
@@ -26,7 +37,7 @@ class StrategyEpisodeEntity(MongoEntity):
 
     band_total_width_pct: Optional[float] = None
     band_params: StrategyParams = Field(default_factory=StrategyParams)
-    
+
     last_event_bar: int = 0
 
     atr_streak: Dict[str, int] = Field(default_factory=dict)

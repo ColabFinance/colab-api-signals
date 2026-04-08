@@ -276,10 +276,11 @@ class ExecuteSignalPipelineUseCase:
         episode: StrategyEpisodeEntity,
     ) -> Tuple[float, float, Dict[str, Any]]:
         """
-        Recalcula (Pa, Pb) SEMPRE depois do get_status() (evita defasagem).
+        Uses the range already decided by the LP strategy.
 
-        - Retorna Pa/Pb na escala HUMANA (USD por risco quando houver USD em um lado).
-        - Reaproveita EvaluateActiveStrategiesUseCase._pick_band_for_trend_totalwidth.
+        This is the critical change that decouples the executor from the old
+        tier-based evaluator. The pipeline now trusts episode.Pa / episode.Pb
+        and only derives price-scale context from live vault status.
         """
         prices = (st.get("prices") or {})
         cur = (prices.get("current") or {})
@@ -303,30 +304,8 @@ class ExecuteSignalPipelineUseCase:
             P_h = p_t1_t0_spot
             human_is_t0_t1 = False
 
-        mode_on_open = (episode.mode_on_open or "").lower()
-        trend_for_pick = "down" if "down" in mode_on_open else "up"
-
-        pool_type = episode.pool_type or "standard"
-        band_params = episode.band_params
-
-        total_width_override = episode.band_total_width_pct
-        if total_width_override is None:
-            if pool_type == "high_vol":
-                total_width_override = float(band_params.high_vol_max_major_side_pct)
-            else:
-                total_width_override = None
-
-        picker = EvaluateActiveStrategiesUseCase.__new__(EvaluateActiveStrategiesUseCase)
-        Pa_h, Pb_h, _, _, _, _= await picker._pick_band_for_trend_totalwidth(
-            P=float(P_h),
-            trend=trend_for_pick,
-            params=band_params,
-            total_width_override=float(total_width_override) if total_width_override is not None else None,
-            pool_type=pool_type,
-        )
-
-        Pa_h = float(Pa_h)
-        Pb_h = float(Pb_h)
+        Pa_h = float(episode.Pa)
+        Pb_h = float(episode.Pb)
         if Pa_h > Pb_h:
             Pa_h, Pb_h = Pb_h, Pa_h
 
@@ -337,6 +316,9 @@ class ExecuteSignalPipelineUseCase:
             "token1_is_usd": bool(token1_is_usd),
             "p_t1_t0_spot": float(p_t1_t0_spot),
             "p_t0_t1_spot": float(p_t0_t1_spot),
+            "open_side": episode.open_side or episode.mode_on_open,
+            "range_width_pct": episode.range_width_pct,
+            "range_width_regime": episode.range_width_regime,
         }
         return Pa_h, Pb_h, ctx
     

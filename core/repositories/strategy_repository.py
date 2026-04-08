@@ -63,3 +63,7 @@ class StrategyRepository(ABC):
         offset: int = 0,
     ) -> List[StrategyEntity]:
         raise NotImplementedError
+    
+    @abstractmethod
+    async def get_active_by_stream_key(self, stream_key: str) -> List[StrategyEntity]:
+        raise NotImplementedError

@@ -13,6 +13,9 @@ from adapters.entry.http.trade_runtime_router import router as trade_runtime_rou
 from adapters.entry.http.trade_strategy_router import router as trade_strategy_router
 from adapters.entry.http.trigger_router import router as triggers_router
 from adapters.external.database.mongodb_client import get_mongo_client
+from adapters.external.database.signal_repository_mongodb import SignalRepositoryMongoDB
+from adapters.external.database.strategy_episode_repository_mongodb import StrategyEpisodeRepositoryMongoDB
+from adapters.external.database.strategy_repository_mongodb import StrategyRepositoryMongoDB
 from adapters.external.database.trade_signal_repository_mongodb import TradeSignalRepositoryMongoDB
 from adapters.external.database.trade_strategy_repository_mongodb import TradeStrategyRepositoryMongoDB
 from adapters.external.database.trade_strategy_runtime_event_repository_mongodb import (
@@ -21,8 +24,12 @@ from adapters.external.database.trade_strategy_runtime_event_repository_mongodb 
 from adapters.external.database.trade_strategy_runtime_snapshot_repository_mongodb import (
     TradeStrategyRuntimeSnapshotRepositoryMongoDB,
 )
+from adapters.external.database.trigger_event_repository_mongodb import TriggerEventRepositoryMongoDB
 from adapters.external.market_data.market_data_http_client import MarketDataHttpClient
 from adapters.external.notify.telegram_notifier import TelegramNotifier
+from adapters.external.pipeline.pipeline_http_client import PipelineHttpClient
+from adapters.external.redis.lp_candle_buffer_repository_redis import LpCandleBufferRepositoryRedis
+from adapters.external.redis.lp_pipeline_stream_publisher import LpPipelineStreamPublisher
 from adapters.external.redis.redis_client import get_redis_client
 from adapters.external.redis.trade_candle_buffer_repository_redis import (
     TradeCandleBufferRepositoryRedis,
@@ -35,13 +42,22 @@ from adapters.external.trade_execution.trade_execution_http_client import (
     TradeExecutionHttpClient,
 )
 from config.settings import settings
+from core.services.lp_indicator_calculation_service import LpIndicatorCalculationService
+from core.services.strategy_reconciler_service import StrategyReconcilerService
+from core.usecases.evaluate_active_strategies_use_case import EvaluateActiveStrategiesUseCase
 from core.usecases.execute_trade_signal_pipeline_use_case import (
     ExecuteTradeSignalPipelineUseCase,
+)
+from core.usecases.lp_candle_buffer_use_case import LpCandleBufferUseCase
+from core.usecases.process_lp_candle_closed_event_use_case import (
+    ProcessLpCandleClosedEventUseCase,
 )
 from core.usecases.process_trade_candle_closed_event_use_case import (
     ProcessTradeCandleClosedEventUseCase,
 )
 from core.usecases.trade_candle_buffer_use_case import TradeCandleBufferUseCase
+from workers.lp_candle_evaluation_shard_worker import LpCandleEvaluationShardWorker
+from workers.lp_candle_ingress_dispatcher_worker import LpCandleIngressDispatcherWorker
 from workers.signal_executor_supervisor import SignalExecutorSupervisor
 from workers.trade_candle_evaluation_shard_worker import TradeCandleEvaluationShardWorker
 from workers.trade_candle_ingress_dispatcher_worker import TradeCandleIngressDispatcherWorker
@@ -91,6 +107,7 @@ async def lifespan(app: FastAPI):
                 settings.REDIS_TRADE_CANDLE_STREAM_BLOCK_MS,
                 settings.REDIS_TRADE_EVAL_BLOCK_MS,
                 settings.REDIS_TRADE_SIGNAL_BLOCK_MS,
+                settings.REDIS_LP_EVAL_BLOCK_MS,
             )
         ) / 1000.0 + 10.0,
     )
@@ -130,12 +147,107 @@ async def lifespan(app: FastAPI):
     market_data_client = MarketDataHttpClient(base_url=settings.MARKET_DATA_BASE_URL)
     app.state.market_data_client = market_data_client
 
+    # LP repositories
+    strategy_repo = StrategyRepositoryMongoDB(db)
+    episode_repo = StrategyEpisodeRepositoryMongoDB(db)
+    signal_repo = SignalRepositoryMongoDB(db)
+    trigger_repo = TriggerEventRepositoryMongoDB(db)
+
+    await strategy_repo.ensure_indexes()
+    await episode_repo.ensure_indexes()
+    await signal_repo.ensure_indexes()
+    await trigger_repo.ensure_indexes()
+
+    lp_candle_buffer_repo = LpCandleBufferRepositoryRedis(
+        redis_client=redis_client,
+        key_prefix=settings.LP_CANDLE_BUFFER_KEY_PREFIX,
+        maxlen=settings.LP_CANDLE_BUFFER_MAXLEN,
+    )
+    app.state.lp_candle_buffer_repo = lp_candle_buffer_repo
+
+    lp_candle_buffer_uc = LpCandleBufferUseCase(
+        candle_buffer_repo=lp_candle_buffer_repo,
+        market_data_client=market_data_client,
+        maxlen=settings.LP_CANDLE_BUFFER_MAXLEN,
+    )
+    app.state.lp_candle_buffer_uc = lp_candle_buffer_uc
+
+    lp_client = PipelineHttpClient(base_url=settings.LP_BASE_URL)
+    app.state.lp_client = lp_client
+
+    lp_reconciler = StrategyReconcilerService(lp_client=lp_client)
+    lp_evaluator_uc = EvaluateActiveStrategiesUseCase(
+        strategy_repo=strategy_repo,
+        episode_repo=episode_repo,
+        signal_repo=signal_repo,
+        reconciling_service=lp_reconciler,
+        lp_client=lp_client,
+        logger=logging.getLogger("LpEvaluateStrategies"),
+        on_signal_created=lp_executor.wake,
+        indicator_service=LpIndicatorCalculationService(),
+    )
+    app.state.lp_evaluator_uc = lp_evaluator_uc
+
+    lp_candle_processor = ProcessLpCandleClosedEventUseCase(
+        trigger_repo=trigger_repo,
+        strategy_repo=strategy_repo,
+        episode_repo=episode_repo,
+        signal_repo=signal_repo,
+        candle_buffer_use_case=lp_candle_buffer_uc,
+        evaluator_use_case=lp_evaluator_uc,
+        market_data_client=market_data_client,
+        logger=logging.getLogger("LpCandleProcessor"),
+    )
+    app.state.lp_candle_processor = lp_candle_processor
+
+    lp_pipeline_publisher = LpPipelineStreamPublisher(
+        redis_client=redis_client,
+        eval_stream_prefix=settings.REDIS_LP_EVAL_STREAM_PREFIX,
+        eval_shard_count=settings.REDIS_LP_EVAL_SHARD_COUNT,
+        stream_maxlen=settings.REDIS_PIPELINE_STREAM_MAXLEN,
+        logger=logging.getLogger("LpPipelinePublisher"),
+    )
+    app.state.lp_pipeline_publisher = lp_pipeline_publisher
+
+    lp_ingress_dispatcher = LpCandleIngressDispatcherWorker(
+        redis_client=redis_client,
+        publisher=lp_pipeline_publisher,
+        source_stream_name=settings.REDIS_TRADE_CANDLE_STREAM,
+        group_name="group:signals:lp:ingest",
+        consumer_name="consumer:signals:lp:ingest:0",
+        block_ms=settings.REDIS_TRADE_CANDLE_STREAM_BLOCK_MS,
+        read_count=settings.REDIS_TRADE_CANDLE_STREAM_READ_COUNT,
+        logger=logging.getLogger("LpCandleIngressDispatcher"),
+    )
+    app.state.lp_candle_ingress_dispatcher = lp_ingress_dispatcher
+
+    lp_eval_workers: list[LpCandleEvaluationShardWorker] = []
+    for shard_id in range(settings.REDIS_LP_EVAL_SHARD_COUNT):
+        stream_name = lp_pipeline_publisher.build_eval_stream_name(shard_id)
+        group_name = f"{settings.REDIS_LP_EVAL_GROUP_PREFIX}-{shard_id}"
+        consumer_name = f"{settings.REDIS_LP_EVAL_CONSUMER_PREFIX}-{shard_id}"
+
+        worker = LpCandleEvaluationShardWorker(
+            redis_client=redis_client,
+            processor=lp_candle_processor,
+            shard_id=shard_id,
+            stream_name=stream_name,
+            group_name=group_name,
+            consumer_name=consumer_name,
+            block_ms=settings.REDIS_LP_EVAL_BLOCK_MS,
+            read_count=settings.REDIS_LP_EVAL_READ_COUNT,
+            logger=logging.getLogger(f"LpCandleEvaluationShard[{shard_id}]"),
+        )
+        lp_eval_workers.append(worker)
+
+    app.state.lp_candle_eval_workers = lp_eval_workers
+
+    # Trade repositories / pipeline remain unchanged.
     trade_strategy_repo = TradeStrategyRepositoryMongoDB(db)
     trade_signal_repo = TradeSignalRepositoryMongoDB(db)
     trade_runtime_snapshot_repo = TradeStrategyRuntimeSnapshotRepositoryMongoDB(db)
     trade_runtime_event_repo = TradeStrategyRuntimeEventRepositoryMongoDB(db)
 
-    # Ensure trade indexes used by evaluation/execution.
     await trade_strategy_repo.ensure_indexes()
     await trade_signal_repo.ensure_indexes()
     await trade_runtime_snapshot_repo.ensure_indexes()
@@ -243,8 +355,11 @@ async def lifespan(app: FastAPI):
     app.state.trade_signal_execution_worker = trade_signal_execution_worker
 
     await lp_executor.start()
-    await ingress_dispatcher.start()
+    await lp_ingress_dispatcher.start()
+    for worker in lp_eval_workers:
+        await worker.start()
 
+    await ingress_dispatcher.start()
     for worker in eval_workers:
         await worker.start()
 
@@ -274,6 +389,18 @@ async def lifespan(app: FastAPI):
             logger.exception("Failed stopping TradeCandleIngressDispatcherWorker.")
 
         try:
+            for worker in getattr(app.state, "lp_candle_eval_workers", []) or []:
+                await worker.stop()
+        except Exception:
+            logger.exception("Failed stopping LpCandleEvaluationShardWorker list.")
+
+        try:
+            if getattr(app.state, "lp_candle_ingress_dispatcher", None) is not None:
+                await app.state.lp_candle_ingress_dispatcher.stop()
+        except Exception:
+            logger.exception("Failed stopping LpCandleIngressDispatcherWorker.")
+
+        try:
             if getattr(app.state, "signal_executor", None) is not None:
                 await app.state.signal_executor.stop()
         except Exception:
@@ -284,6 +411,12 @@ async def lifespan(app: FastAPI):
                 await app.state.trade_execution_client.aclose()
         except Exception:
             logger.exception("Failed closing TradeExecutionHttpClient.")
+
+        try:
+            if getattr(app.state, "lp_client", None) is not None:
+                await app.state.lp_client.aclose()
+        except Exception:
+            logger.exception("Failed closing PipelineHttpClient.")
 
         try:
             if getattr(app.state, "market_data_client", None) is not None:

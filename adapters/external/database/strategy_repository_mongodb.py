@@ -28,6 +28,7 @@ class StrategyRepositoryMongoDB(StrategyRepository):
     async def ensure_indexes(self) -> None:
         await self._col.create_index([("status", 1), ("symbol", 1)], name="ix_status_symbol")
         await self._col.create_index([("indicator_set_id", 1), ("status", 1)], name="ix_set_status")
+        await self._col.create_index([("stream_key", 1), ("status", 1)], name="ix_stream_key_status")
         await self._col.create_index([("name", 1), ("symbol", 1)], unique=True, name="ux_name_symbol")
 
         await self._col.create_index(
@@ -74,14 +75,12 @@ class StrategyRepositoryMongoDB(StrategyRepository):
         try:
             await self._col.update_one(key, update, upsert=True)
         except DuplicateKeyError as e:
-            # collide on ux_name_symbol (name+symbol)
             raise ValueError("DUPLICATE_NAME_SYMBOL") from e
         found = await self._col.find_one(key)
         return StrategyEntity.from_mongo(found)
 
     async def upsert_by_onchain_identity(self, strategy: StrategyEntity) -> StrategyEntity:
         if not strategy.chain or not strategy.owner or not strategy.strategy_id:
-            # fallback
             return await self.upsert(strategy)
 
         now_ms, now_iso = self._now()
@@ -106,7 +105,6 @@ class StrategyRepositoryMongoDB(StrategyRepository):
         try:
             await self._col.update_one(key, update, upsert=True)
         except DuplicateKeyError as e:
-            # collide on ux_name_symbol (name+symbol)
             raise ValueError("DUPLICATE_NAME_SYMBOL") from e
         found = await self._col.find_one(key)
         return StrategyEntity.from_mongo(found)
@@ -119,6 +117,16 @@ class StrategyRepositoryMongoDB(StrategyRepository):
 
     async def get_active_by_indicator_set(self, indicator_set_id: str) -> List[StrategyEntity]:
         cursor = self._col.find({"indicator_set_id": indicator_set_id, "status": "ACTIVE"})
+        docs = await cursor.to_list(length=None)
+        return [StrategyEntity.from_mongo(d) for d in docs if d]
+
+    async def get_active_by_stream_key(self, stream_key: str) -> List[StrategyEntity]:
+        cursor = self._col.find(
+            {
+                "stream_key": str(stream_key).strip().lower(),
+                "status": "ACTIVE",
+            }
+        )
         docs = await cursor.to_list(length=None)
         return [StrategyEntity.from_mongo(d) for d in docs if d]
 
